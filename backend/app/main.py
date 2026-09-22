@@ -1,26 +1,20 @@
-"""FastAPI Application Entry Point with CORS, Lifespan Hooks, and Healthcheck."""
+"""FastAPI Application Entry Point with CORS, Lifespan Hooks, and Mounted Routers."""
 
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.api.chat import router as chat_router
+from app.api.documents import router as documents_router
+from app.api.metrics import router as metrics_router
 from app.core.config import settings
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan manager for startup and shutdown events.
-
-    This is where we initialize singletons (e.g., loading local embedding
-    models in-process) so they load ONCE at server startup instead of
-    reloading on every request.
-    """
-    # Startup: Log initialization
+    """Application lifespan manager for startup and shutdown events."""
     print(f"Starting {settings.APP_NAME} in [{settings.APP_ENV}] mode...")
-
-    yield  # Application runs and handles requests here
-
-    # Shutdown: Cleanup resources
+    yield
     print("Shutting down backend service...")
 
 
@@ -32,8 +26,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Configure CORS (Cross-Origin Resource Sharing)
-# Restricts frontend browser requests to allowed domains (AGENT.md §9)
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
@@ -41,6 +34,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount Resource Routers (AGENT.md §4)
+app.include_router(documents_router, prefix="/api/documents", tags=["Documents"])
+app.include_router(metrics_router, prefix="/api/metrics", tags=["Metrics & Ratios"])
+app.include_router(chat_router, prefix="/api/chat", tags=["Conversational RAG"])
 
 
 @app.get("/health", tags=["System"])
