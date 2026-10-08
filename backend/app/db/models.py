@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Integer,
@@ -82,6 +83,12 @@ class FinancialMetric(Base):
         Integer, nullable=False
     )  # Strict non-nullable provenance (AGENT.md §1 Rule 2)
     source_chunk_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    verified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )  # Verbatim grounding in source table
+    low_confidence: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )  # Flagged by accounting equation or grounding mismatch
 
     __table_args__ = (UniqueConstraint("document_id", "metric_name", name="uq_document_metric"),)
 

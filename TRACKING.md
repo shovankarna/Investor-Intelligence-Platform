@@ -246,18 +246,19 @@ flowchart TD
 ---
 
 ### Phase 3: Structured Metric Extraction & Line-Item Persistence
-- [ ] **3.1 Financial Metric Extraction Engine**
-  - [ ] Filter Docling tables specifically containing Financial Statements (Income Statement, Balance Sheet, Cash Flows).
-  - [ ] Formulate JSON schema for raw line items (13 target metrics) with unit and currency.
-  - [ ] Call OpenRouter structured generation model to map table figures to standard metric keys.
-  - [ ] Force LLM to cite `source_page` and `source_chunk_id` for each metric extracted.
-- [ ] **3.2 Metric Validation & Storage**
-  - [ ] Clean and normalize values (scaling thousands/millions to base numbers, verifying negative parentheses).
-  - [ ] Upsert metrics into `financial_metrics` table with unique constraint on `(document_id, metric_name)`.
-  - [ ] Provide rollback / error handling if extraction fails.
-- [ ] **3.3 Financial Calculations Service**
-  - [ ] Implement pure Python service calculating Margins, FCF, Debt-to-Equity, ROE, ROA.
-  - [ ] Implement multi-year YoY growth rate calculation across available fiscal years for the same company.
+- [x] **3.1 Financial Metric Extraction Engine (LLM-First with Deterministic Verification)**
+  - [x] Primary statement filter (Consolidated Operations/Income, Balance Sheets, Cash Flows) dropping all footnote/non-primary tables.
+  - [x] Batched OpenRouter extraction sending all primary statements in ONE single call with unscaled printed values.
+  - [x] Verbatim grounding check per metric against source table text.
+  - [x] Deterministic Python accounting checks (Balance Sheet: Assets == Liabilities + Equity; Operations: Gross Profit == Revenue - COGS).
+  - [x] Single statement retry on accounting check failure with fallback to low_confidence flag (no silent drops).
+- [x] **3.2 Metric Validation & Storage**
+  - [x] Apply mathematical unit scaling in Python after verification (millions -> base units; EPS untouched).
+  - [x] Store `verified` and `low_confidence` flags on `financial_metrics` table with Alembic migration.
+  - [x] Upsert metrics into `financial_metrics` table with unique constraint on `(document_id, metric_name)`.
+- [x] **3.3 Financial Calculations Service**
+  - [x] Implement pure Python service calculating Margins, FCF, Debt-to-Equity, ROE, ROA.
+  - [x] Implement multi-year YoY growth rate calculation across available fiscal years for the same company.
 
 ---
 

@@ -8,7 +8,7 @@ allows universal ratio calculations and side-by-side comparative dashboards.
 
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RawMetricItem(BaseModel):
@@ -23,10 +23,31 @@ class RawMetricItem(BaseModel):
         description="Unit scale: 'USD_millions', 'USD_thousands', 'USD_units'",
     )
     currency: str = Field(default="USD", description="Currency ISO code")
-    source_page: int = Field(..., description="Physical PDF page number where this figure appears")
+    fiscal_year: int | None = Field(None, description="Fiscal year (e.g., 2024)")
+    source_page: int = Field(
+        default=1, description="Physical PDF page number where this figure appears"
+    )
+    page_number: int | None = Field(
+        None, description="Alias for source_page from extraction output"
+    )
     source_chunk_id: str | None = Field(
         None, description="Optional reference to the source chunk/table"
     )
+    verified: bool = Field(
+        default=True, description="True if value appeared verbatim in source table text"
+    )
+    low_confidence: bool = Field(
+        default=False,
+        description="True if accounting equation or grounding check flagged this metric",
+    )
+
+    @model_validator(mode="after")
+    def sync_page_number(self) -> "RawMetricItem":
+        if self.page_number is not None and (self.source_page is None or self.source_page <= 0):
+            self.source_page = self.page_number
+        elif self.source_page is not None and self.page_number is None:
+            self.page_number = self.source_page
+        return self
 
 
 class RawMetricResponse(RawMetricItem):

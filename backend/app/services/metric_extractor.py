@@ -1,13 +1,19 @@
 """
-Structured Financial Metric Extraction Service using OpenRouter.
+Structured Financial Metric Extraction Service with Deterministic Verification.
 
-WHY STRUCTURED EXTRACTION OVER FREE-FORM TEXT (AGENT.md §8):
-1. Financial reports use different line item names ('Net Sales' vs 'Total Revenue',
-   'Additions to Property & Equipment' vs 'Capital Expenditures').
-2. We provide an explicit Pydantic schema and accounting standard alias maps to OpenRouter models
-   (US GAAP for 10-K/10-Q, IFRS for 20-F), forcing the model to normalize variations to standard snake_case keys.
-3. Strict Provenance: Every single metric MUST cite its source_page (ADR-2).
+WHY DETERMINISTIC VERIFICATION OVER RAW LLM OUTPUT:
+1. Table Filtering: Drops footnotes and supplementary schedules; sends only primary financial statements.
+2. Batched Extraction: Extracts all 13 core metrics across all primary statements in ONE batched LLM call.
+3. Printed Values: LLM returns numbers exactly as printed (no hallucinated scaling).
+4. Verbatim Grounding: Every returned figure must appear verbatim in the source table text for its page.
+5. Accounting Integrity: Verifies fundamental accounting equations (Balance Sheet & Gross Profit).
+   On failure, retries once with only the failing statement, flagging low-confidence without silent drops.
+6. Unit Scaling: Applies mathematical unit scaling in Python after verification.
 """
+
+import re
+from decimal import Decimal
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
@@ -16,12 +22,18 @@ from app.models.metrics import RawMetricItem
 from app.models.parser import ParsedTable
 
 
+class PrimaryStatementType(StrEnum):
+    OPERATIONS = "operations"
+    BALANCE_SHEET = "balance_sheet"
+    CASH_FLOWS = "cash_flows"
+
+
 class ExtractedMetricList(BaseModel):
     """Container schema for structured LLM extraction output."""
 
     metrics: list[RawMetricItem] = Field(
         default_factory=list,
-        description="List of extracted raw financial line items with page provenance",
+        description="List of extracted raw financial line items with page provenance and unscaled values",
     )
 
 
@@ -44,21 +56,9 @@ US_GAAP_ALIASES: dict[str, list[str]] = {
     ],
     "gross_profit": ["Gross margin", "Gross profit"],
     "operating_expenses": ["Total operating expenses", "Operating expenses"],
-    "operating_income": [
-        "Operating income",
-        "Income from operations",
-        "Operating profit",
-    ],
-    "net_income": [
-        "Net income",
-        "Net earnings",
-        "Net income attributable to common shareholders",
-    ],
-    "diluted_eps": [
-        "Diluted earnings per share",
-        "Diluted net income per share",
-        "Diluted EPS",
-    ],
+    "operating_income": ["Operating income", "Income from operations", "Operating profit"],
+    "net_income": ["Net income", "Net earnings", "Net income attributable to common shareholders"],
+    "diluted_eps": ["Diluted earnings per share", "Diluted net income per share", "Diluted EPS"],
     "total_assets": ["Total assets"],
     "total_liabilities": ["Total liabilities"],
     "stockholders_equity": [
@@ -104,11 +104,7 @@ IFRS_ALIASES: dict[str, list[str]] = {
         "Net income",
         "Profit attributable to owners of the parent",
     ],
-    "diluted_eps": [
-        "Diluted earnings per share",
-        "Diluted profit per share",
-        "Diluted EPS",
-    ],
+    "diluted_eps": ["Diluted earnings per share", "Diluted profit per share", "Diluted EPS"],
     "total_assets": ["Total assets", "Total non-current assets and current assets"],
     "total_liabilities": [
         "Total liabilities",
@@ -139,7 +135,7 @@ IFRS_ALIASES: dict[str, list[str]] = {
 
 
 class MetricExtractionService:
-    """Service that coordinates LLM-based extraction of the 13 core financial metrics."""
+    """Service that coordinates table selection, batched LLM extraction, grounding verification, and scaling."""
 
     @classmethod
     def get_alias_map(cls, form_type: str = "10-K") -> dict[str, list[str]]:
@@ -148,9 +144,98 @@ class MetricExtractionService:
             return IFRS_ALIASES
         return US_GAAP_ALIASES
 
+    @staticmethod
+    def classify_table(table: ParsedTable) -> PrimaryStatementType | None:
+        """
+        Classifies a table into a primary financial statement type based on section_path and headings.
+        Returns None for non-primary tables (e.g. footnotes, segment data, disclosures).
+        """
+        if table.num_rows < 4:
+            return None
+
+        combined = f"{table.section_path}\n{table.markdown_content[:400]}".lower()
+
+        # 1. Cash flows
+        if "cash flow" in combined or "cash flows" in combined:
+            return PrimaryStatementType.CASH_FLOWS
+
+        # 2. Balance sheet
+        if "balance sheet" in combined or "financial position" in combined:
+            return PrimaryStatementType.BALANCE_SHEET
+
+        # 3. Operations / Income statement
+        if (
+            "statement of operations" in combined
+            or "statements of operations" in combined
+            or "statement of income" in combined
+            or "statements of income" in combined
+            or "statement of earnings" in combined
+            or "statements of earnings" in combined
+            or "statement of profit or loss" in combined
+            or "income statement" in combined
+            or ("operations" in combined and ("revenue" in combined or "sales" in combined))
+        ):
+            return PrimaryStatementType.OPERATIONS
+
+        return None
+
     @classmethod
-    def get_system_prompt(cls, form_type: str = "10-K") -> str:
-        """Constructs a context-aware system prompt with accounting standard alias hints."""
+    def select_primary_statement_tables(
+        cls, tables: list[ParsedTable]
+    ) -> dict[PrimaryStatementType, ParsedTable]:
+        """
+        Filters table candidates down to only the primary statements.
+        Drops all other tables.
+        """
+        selected: dict[PrimaryStatementType, ParsedTable] = {}
+
+        for table in tables:
+            st_type = cls.classify_table(table)
+            if st_type is None:
+                continue
+
+            if st_type not in selected:
+                selected[st_type] = table
+            else:
+                # Disambiguate: prefer tables with "consolidated" in title and larger row counts
+                prev_table = selected[st_type]
+                curr_is_cons = (
+                    "consolidated" in table.section_path.lower()
+                    or "consolidated" in table.markdown_content[:200].lower()
+                )
+                prev_is_cons = (
+                    "consolidated" in prev_table.section_path.lower()
+                    or "consolidated" in prev_table.markdown_content[:200].lower()
+                )
+                curr_score = (10 if curr_is_cons else 0) + table.num_rows
+                prev_score = (10 if prev_is_cons else 0) + prev_table.num_rows
+
+                if curr_score > prev_score:
+                    selected[st_type] = table
+
+        return selected
+
+    @staticmethod
+    def detect_unit_header(tables: list[ParsedTable]) -> str:
+        """Extracts standard unit header (e.g. 'In millions') from table content."""
+        pattern = re.compile(r"\((?:amounts\s+in|in)\s+([a-zA-Z]+)(?:,\s*[^)]*)?\)", re.IGNORECASE)
+        for t in tables:
+            match = pattern.search(t.markdown_content[:300])
+            if match:
+                unit_word = match.group(1).lower()
+                if "million" in unit_word:
+                    return "In millions"
+                elif "thousand" in unit_word:
+                    return "In thousands"
+                elif "billion" in unit_word:
+                    return "In billions"
+        return "In millions"
+
+    @classmethod
+    def get_batched_system_prompt(
+        cls, form_type: str = "10-K", unit_header: str = "In millions"
+    ) -> str:
+        """Builds system prompt for batched multi-statement extraction."""
         is_ifrs = (form_type or "").upper() == "20-F"
         standard_name = (
             "IFRS (International Financial Reporting Standards)" if is_ifrs else "US GAAP"
@@ -161,10 +246,10 @@ class MetricExtractionService:
             f"- {metric}: {', '.join(aliases)}" for metric, aliases in alias_map.items()
         )
 
-        return f"""You are a precise financial data extraction analyst.
-Analyze the provided financial statement table from an SEC {form_type} filing adhering to {standard_name}.
+        return f"""You are an elite financial data extraction analyst.
+Analyze the provided Primary Financial Statements from an SEC {form_type} filing ({standard_name}).
 
-Extract any of the following 13 target metrics if they appear in the table:
+Extract the 13 target financial metrics:
 - Income Statement: total_revenue, cost_of_revenue, gross_profit, operating_expenses, operating_income, net_income, diluted_eps
 - Balance Sheet: total_assets, total_liabilities, stockholders_equity, cash_and_equivalents
 - Cash Flow: operating_cash_flow, capital_expenditures
@@ -172,77 +257,282 @@ Extract any of the following 13 target metrics if they appear in the table:
 Standard Line Item Aliases for {standard_name}:
 {aliases_formatted}
 
-RULES:
-1. Return EXACT raw numeric values in the specified unit (e.g. if reported in millions, 383,285 represents 383285).
-2. Parentheses indicate negative numbers: (1,234) -> -1234.
-3. You MUST provide the exact source_page number provided in the table metadata.
-4. If a metric is NOT in the table, DO NOT invent or guess it; simply omit it.
+CRITICAL RULES:
+1. Return values EXACTLY AS PRINTED in the tables. DO NOT SCALE or multiply by 1,000,000 or 1,000 (e.g., if printed as 383,285 with '{unit_header}', return value 383285, NOT 383285000000).
+2. For negative numbers formatted as (1,234), return -1234.
+3. Every metric MUST cite the exact page_number where the figure appears.
+4. Specify the unit scale as reported (e.g. 'USD_millions', 'USD_thousands', 'USD_units') and fiscal_year.
+5. If a metric is not present in the statements, omit it.
 """
 
+    @staticmethod
+    def check_verbatim_grounding(metric: RawMetricItem, source_text: str) -> bool:
+        """
+        Verifies that a returned numeric value appears verbatim in the source table text.
+        """
+        val = metric.value
+        candidates = {str(val)}
+
+        try:
+            int_val = int(val)
+            candidates.add(f"{int_val}")
+            candidates.add(f"{int_val:,}")
+            candidates.add(f"${int_val:,}")
+            candidates.add(f"$ {int_val:,}")
+            candidates.add(f"${int_val}")
+            if val < 0:
+                abs_int = abs(int_val)
+                candidates.add(f"({abs_int:,})")
+                candidates.add(f"({abs_int})")
+                candidates.add(f"(${abs_int:,})")
+                candidates.add(f"($ {abs_int:,})")
+                candidates.add(f"-{abs_int:,}")
+                candidates.add(f"-{abs_int}")
+        except (ValueError, TypeError, OverflowError):
+            pass
+
+        # Decimal format (e.g. EPS 6.13)
+        str_2f = f"{val:.2f}"
+        candidates.add(str_2f)
+        candidates.add(f"${str_2f}")
+        candidates.add(f"$ {str_2f}")
+
+        for cand in candidates:
+            if cand in source_text:
+                return True
+
+        return False
+
+    @staticmethod
+    def check_accounting_equations(metrics: dict[str, RawMetricItem]) -> tuple[bool, bool]:
+        """
+        Performs deterministic accounting checks:
+        1. Balance sheet: assets == liabilities + equity
+        2. Operations: gross_profit == revenue - COGS
+        Returns (bs_valid, ops_valid).
+        """
+        bs_valid = True
+        ops_valid = True
+
+        # 1. Balance Sheet: assets == liabilities + equity
+        assets = metrics.get("total_assets")
+        liabilities = metrics.get("total_liabilities")
+        equity = metrics.get("stockholders_equity")
+        if assets is not None and liabilities is not None and equity is not None:
+            if assets.value != liabilities.value + equity.value:
+                bs_valid = False
+
+        # 2. Operations: gross_profit == revenue - cost_of_revenue
+        rev = metrics.get("total_revenue")
+        cogs = metrics.get("cost_of_revenue")
+        gross = metrics.get("gross_profit")
+        if rev is not None and cogs is not None and gross is not None:
+            if gross.value != rev.value - cogs.value:
+                ops_valid = False
+
+        return bs_valid, ops_valid
+
     @classmethod
-    async def extract_metrics_from_table(
-        cls, table: ParsedTable, form_type: str = "10-K"
+    async def _extract_single_statement_retry(
+        cls,
+        statement_type: PrimaryStatementType,
+        table: ParsedTable,
+        form_type: str,
+        fiscal_year: int | None,
+        unit_header: str,
     ) -> list[RawMetricItem]:
         """
-        Extracts financial line items from a single parsed table.
-
-        Args:
-            table: ParsedTable instance with markdown content and page provenance.
-            form_type: SEC filing form type ('10-K', '10-Q', '20-F').
-
-        Returns:
-            List of validated RawMetricItem instances.
+        Retries extraction for ONLY the failing statement table.
         """
         user_prompt = f"""
+Target Statement: {statement_type.value.upper()}
 Table Metadata:
 - Page Number: {table.page_number}
 - Section: {table.section_path}
+- Unit Header: {unit_header}
+{"- Filing Fiscal Year: " + str(fiscal_year) if fiscal_year else ""}
 
 Table Markdown:
 {table.markdown_content}
-"""
 
+Extract ONLY the metrics belonging to this statement for the target fiscal year.
+Return numbers exactly as printed (no unit scaling).
+"""
         messages = [
-            {"role": "system", "content": cls.get_system_prompt(form_type)},
+            {"role": "system", "content": cls.get_batched_system_prompt(form_type, unit_header)},
             {"role": "user", "content": user_prompt},
         ]
-
         try:
             result: ExtractedMetricList = await llm_client.generate_structured(
                 messages=messages,
                 schema=ExtractedMetricList,
                 temperature=0.0,
             )
-            # Ensure each metric carries the table's source_page and chunk reference
-            for metric in result.metrics:
-                if metric.source_page <= 0:
-                    metric.source_page = table.page_number
-                metric.source_chunk_id = f"p{table.page_number}_t{table.table_index}"
+            for m in result.metrics:
+                if m.source_page <= 0:
+                    m.source_page = table.page_number
+                m.source_chunk_id = f"p{table.page_number}_t{table.table_index}"
             return result.metrics
         except Exception as exc:
-            print(
-                f"⚠️ [Extraction] Failed to extract metrics from table on page {table.page_number}: {exc}"
-            )
+            print(f"⚠️ [Retry Extraction] Failed retry for {statement_type}: {exc}")
             return []
+
+    @staticmethod
+    def apply_unit_scaling(metrics: list[RawMetricItem]) -> list[RawMetricItem]:
+        """
+        Applies mathematical unit scaling in Python after verification.
+        Numbers in millions are scaled by 1,000,000 (diluted EPS is preserved unscaled).
+        """
+        for m in metrics:
+            if m.metric_name == "diluted_eps":
+                continue
+
+            unit_lower = (m.unit or "").lower()
+            if "million" in unit_lower:
+                m.value = m.value * Decimal(1000000)
+                m.unit = "USD_units"
+            elif "thousand" in unit_lower:
+                m.value = m.value * Decimal(1000)
+                m.unit = "USD_units"
+            elif "billion" in unit_lower:
+                m.value = m.value * Decimal(1000000000)
+                m.unit = "USD_units"
+
+        return metrics
 
     @classmethod
     async def extract_all_metrics(
-        cls, tables: list[ParsedTable], form_type: str = "10-K"
+        cls,
+        tables: list[ParsedTable],
+        form_type: str = "10-K",
+        fiscal_year: int | None = None,
     ) -> list[RawMetricItem]:
         """
-        Iterates over all candidate tables in a document and extracts financial metrics.
-        Deduplicates by metric_name, keeping the latest/most specific statement figure.
+        Executes the full LLM-first extraction pipeline with deterministic verification:
+        1. Selects only primary statements (drops all other tables).
+        2. Sends all selected tables in ONE batched OpenRouter call with printed values.
+        3. Verbatim grounding check per metric against source table text.
+        4. Deterministic Python accounting checks; retries once on failing statement.
+        5. Applies unit scaling in Python after verification.
         """
-        extracted_map: dict[str, RawMetricItem] = {}
+        # Step 1: Select only primary statement tables (drop all others)
+        selected_tables = cls.select_primary_statement_tables(tables)
+        if not selected_tables:
+            return []
 
-        for table in tables:
-            # Quick heuristic: Skip tiny non-financial tables (< 3 rows)
-            if table.num_rows < 3:
-                continue
+        unit_header = cls.detect_unit_header(list(selected_tables.values()))
 
-            items = await cls.extract_metrics_from_table(table, form_type=form_type)
-            for item in items:
-                # Upsert by metric_name
-                extracted_map[item.metric_name] = item
+        # Step 2: Build batched prompt containing all selected primary statements
+        statement_blocks = []
+        full_source_text_by_page: dict[int, str] = {}
+        all_tables_text = ""
 
-        return list(extracted_map.values())
+        for st_type, tbl in selected_tables.items():
+            full_source_text_by_page[tbl.page_number] = tbl.markdown_content
+            all_tables_text += f"\n{tbl.markdown_content}\n"
+            statement_blocks.append(
+                f"### Statement: {st_type.value.upper()} (Page {tbl.page_number} | {tbl.section_path})\n{tbl.markdown_content}"
+            )
+
+        statements_joined = "\n\n".join(statement_blocks)
+        fy_line = f"Filing Fiscal Year: {fiscal_year}" if fiscal_year else ""
+
+        user_prompt = f"""
+Unit Header: {unit_header}
+{fy_line}
+
+Primary Statements:
+{statements_joined}
+
+Extract the 13 target financial metrics for the requested fiscal year.
+Return values EXACTLY as printed in the tables without scaling.
+"""
+
+        messages = [
+            {"role": "system", "content": cls.get_batched_system_prompt(form_type, unit_header)},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        # Call OpenRouter in ONE batched call
+        try:
+            batched_result: ExtractedMetricList = await llm_client.generate_structured(
+                messages=messages,
+                schema=ExtractedMetricList,
+                temperature=0.0,
+            )
+            raw_metrics = batched_result.metrics
+        except Exception as exc:
+            print(f"⚠️ [Batched Extraction] Failed batched extraction: {exc}")
+            raw_metrics = []
+
+        metrics_map: dict[str, RawMetricItem] = {}
+        for m in raw_metrics:
+            metrics_map[m.metric_name] = m
+
+        # Step 3: Grounding check (value must appear verbatim in source table text)
+        for m in metrics_map.values():
+            page_text = full_source_text_by_page.get(m.source_page, all_tables_text)
+            is_grounded = cls.check_verbatim_grounding(
+                m, page_text
+            ) or cls.check_verbatim_grounding(m, all_tables_text)
+            m.verified = is_grounded
+            if not is_grounded:
+                m.low_confidence = True
+
+        # Step 4: Accounting checks in Python (Decimal)
+        bs_valid, ops_valid = cls.check_accounting_equations(metrics_map)
+
+        # Retry Balance Sheet once if check failed
+        if not bs_valid and PrimaryStatementType.BALANCE_SHEET in selected_tables:
+            bs_tbl = selected_tables[PrimaryStatementType.BALANCE_SHEET]
+            retried_bs = await cls._extract_single_statement_retry(
+                statement_type=PrimaryStatementType.BALANCE_SHEET,
+                table=bs_tbl,
+                form_type=form_type,
+                fiscal_year=fiscal_year,
+                unit_header=unit_header,
+            )
+            for m in retried_bs:
+                metrics_map[m.metric_name] = m
+                is_grounded = cls.check_verbatim_grounding(m, bs_tbl.markdown_content)
+                m.verified = is_grounded
+                if not is_grounded:
+                    m.low_confidence = True
+
+            new_bs_valid, _ = cls.check_accounting_equations(metrics_map)
+            if not new_bs_valid:
+                # Mark failing balance sheet metrics with verified=False, low_confidence=True instead of dropping
+                for k in ["total_assets", "total_liabilities", "stockholders_equity"]:
+                    if k in metrics_map:
+                        metrics_map[k].verified = False
+                        metrics_map[k].low_confidence = True
+
+        # Retry Operations once if check failed
+        if not ops_valid and PrimaryStatementType.OPERATIONS in selected_tables:
+            ops_tbl = selected_tables[PrimaryStatementType.OPERATIONS]
+            retried_ops = await cls._extract_single_statement_retry(
+                statement_type=PrimaryStatementType.OPERATIONS,
+                table=ops_tbl,
+                form_type=form_type,
+                fiscal_year=fiscal_year,
+                unit_header=unit_header,
+            )
+            for m in retried_ops:
+                metrics_map[m.metric_name] = m
+                is_grounded = cls.check_verbatim_grounding(m, ops_tbl.markdown_content)
+                m.verified = is_grounded
+                if not is_grounded:
+                    m.low_confidence = True
+
+            _, new_ops_valid = cls.check_accounting_equations(metrics_map)
+            if not new_ops_valid:
+                for k in ["total_revenue", "cost_of_revenue", "gross_profit"]:
+                    if k in metrics_map:
+                        metrics_map[k].verified = False
+                        metrics_map[k].low_confidence = True
+
+        # Step 5: Apply unit scaling in Python after verification
+        final_metrics = list(metrics_map.values())
+        final_metrics = cls.apply_unit_scaling(final_metrics)
+
+        return final_metrics

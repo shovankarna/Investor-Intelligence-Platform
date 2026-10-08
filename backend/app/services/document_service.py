@@ -121,7 +121,9 @@ class DocumentService:
         # Step 7: Path A - Extract raw financial metrics from tables via OpenRouter
         if parsed_result.tables:
             extracted_metrics = await MetricExtractionService.extract_all_metrics(
-                parsed_result.tables, form_type=new_doc.form_type
+                parsed_result.tables,
+                form_type=new_doc.form_type,
+                fiscal_year=new_doc.fiscal_year,
             )
             for m in extracted_metrics:
                 metric_row = FinancialMetric(
@@ -132,6 +134,8 @@ class DocumentService:
                     currency=m.currency,
                     source_page=m.source_page,
                     source_chunk_id=m.source_chunk_id,
+                    verified=m.verified,
+                    low_confidence=m.low_confidence,
                 )
                 session.add(metric_row)
 
