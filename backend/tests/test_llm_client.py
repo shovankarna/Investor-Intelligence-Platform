@@ -2,8 +2,9 @@
 
 import pytest
 from pydantic import BaseModel
+
 from app.llm.client import OpenRouterClient
-from app.llm.schemas import ChatResponse, CitationItem
+from app.llm.schemas import ChatResponse
 
 
 class SimpleMetricOutput(BaseModel):

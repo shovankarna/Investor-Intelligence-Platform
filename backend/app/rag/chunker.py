@@ -10,35 +10,38 @@ WHY NAIVE CHARACTER-COUNT CHUNKING FAILS IN FINANCE (AGENT.md §6):
    This guarantees the embedding captures the company and section context.
 """
 
-from typing import List
 from app.core.config import settings
 from app.db.models import Chunk
-from app.models.parser import ParsedDocumentResult, ParsedProse, ParsedTable
+from app.models.parser import ParsedDocumentResult
 
 
 class DocumentChunker:
     """Chunks layout-aware document elements while preserving structural hierarchy."""
 
     @staticmethod
-    def _create_contextual_header(company: str, fiscal_year: int, section_path: str, page_no: int) -> str:
+    def _create_contextual_header(
+        company: str, fiscal_year: int, section_path: str, page_no: int
+    ) -> str:
         """
         Creates a structured header prepended to the chunk text.
         This solves the 'out-of-context retrieval' problem in RAG.
         """
-        return f"[Company: {company} | FY{fiscal_year} | Section: {section_path} | Page: {page_no}]\n"
+        return (
+            f"[Company: {company} | FY{fiscal_year} | Section: {section_path} | Page: {page_no}]\n"
+        )
 
     @classmethod
-    def chunk_document(cls, parsed_doc: ParsedDocumentResult) -> List[Chunk]:
+    def chunk_document(cls, parsed_doc: ParsedDocumentResult) -> list[Chunk]:
         """
         Transforms parsed tables and prose into database Chunk models.
-        
+
         Args:
             parsed_doc: Parsed output from Docling containing tables and prose blocks.
-            
+
         Returns:
             List of database Chunk records ready for embedding and storage.
         """
-        chunks: List[Chunk] = []
+        chunks: list[Chunk] = []
         doc_id = parsed_doc.document_id
         company = parsed_doc.company
         fiscal_year = parsed_doc.fiscal_year
@@ -52,7 +55,7 @@ class DocumentChunker:
                 company, fiscal_year, table.section_path, table.page_number
             )
             table_content = f"{header}Table ({table.num_rows} rows x {table.num_cols} cols):\n{table.markdown_content}"
-            
+
             chunk_id = f"{doc_id}_p{table.page_number}_t{table.table_index}"
             chunks.append(
                 Chunk(
@@ -70,15 +73,17 @@ class DocumentChunker:
         # -------------------------------------------------------------
         current_section = ""
         current_page = 1
-        current_buffer: List[str] = []
+        current_buffer: list[str] = []
         current_word_count = 0
-        
+
         # Word budget approximation: 1 token ≈ 0.75 words (300-600 tokens ≈ 225-450 words)
         max_words = int(settings.CHUNK_MAX_TOKENS * 0.75)
 
         for prose in parsed_doc.prose_blocks:
             # When section changes or page changes significantly, flush buffer
-            if current_buffer and (prose.section_path != current_section or current_word_count >= max_words):
+            if current_buffer and (
+                prose.section_path != current_section or current_word_count >= max_words
+            ):
                 header = cls._create_contextual_header(
                     company, fiscal_year, current_section, current_page
                 )

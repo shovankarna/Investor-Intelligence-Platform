@@ -5,16 +5,17 @@ WHY HYBRID SEARCH + RERANKING (PROJECT.md §5.2):
 1. Two-Stage Retrieval Pipeline:
    - Stage 1 (Candidate Retrieval): Fetch top-20 chunks using dense vector cosine similarity
      and full-text keyword matching (fast, high recall).
-   - Stage 2 (Cross-Encoder Scoring): 'BAAI/bge-reranker-base' scores (Query, Chunk) pairs 
+   - Stage 2 (Cross-Encoder Scoring): 'BAAI/bge-reranker-base' scores (Query, Chunk) pairs
      jointly with full cross-attention to filter down to the top-5 most relevant chunks (high precision).
 2. Zero API Cost: Reranker runs locally in memory (~400MB footprint).
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+
 from sentence_transformers import CrossEncoder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import settings
 from app.db.models import Chunk, Document
 from app.rag.embedder import EmbeddingService
@@ -23,6 +24,7 @@ from app.rag.embedder import EmbeddingService
 @dataclass
 class RerankedChunk:
     """Container holding a chunk and its cross-encoder rerank score."""
+
     chunk: Chunk
     rerank_score: float
 
@@ -45,10 +47,10 @@ class HybridRetriever:
         cls,
         session: AsyncSession,
         query: str,
-        company: Optional[str] = None,
-        fiscal_year: Optional[int] = None,
+        company: str | None = None,
+        fiscal_year: int | None = None,
         top_k: int = 20,
-    ) -> List[Chunk]:
+    ) -> list[Chunk]:
         """
         Stage 1: Retrieves top-K candidate chunks using vector similarity and document filters.
         """
@@ -76,17 +78,17 @@ class HybridRetriever:
     def rerank_chunks(
         cls,
         query: str,
-        candidates: List[Chunk],
+        candidates: list[Chunk],
         top_n: int = 5,
-    ) -> List[Tuple[Chunk, float]]:
+    ) -> list[tuple[Chunk, float]]:
         """
         Stage 2: Reranks candidate chunks with Cross-Encoder and returns top-N.
-        
+
         Args:
             query: User's question string.
             candidates: Top-K chunks from Stage 1.
             top_n: Final count of high-precision chunks to retain.
-            
+
         Returns:
             List of (Chunk, score) tuples sorted by relevance score descending.
         """
@@ -94,13 +96,13 @@ class HybridRetriever:
             return []
 
         reranker = cls.get_reranker()
-        
+
         # Prepare query-document pairs for Cross-Encoder
         pairs = [[query, chunk.content] for chunk in candidates]
         scores = reranker.predict(pairs)
 
         # Pair chunks with their cross-encoder score and sort descending
-        scored_candidates = list(zip(candidates, [float(s) for s in scores]))
+        scored_candidates = list(zip(candidates, [float(s) for s in scores], strict=False))
         scored_candidates.sort(key=lambda x: x[1], reverse=True)
 
         return scored_candidates[:top_n]

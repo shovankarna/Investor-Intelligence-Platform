@@ -1,6 +1,7 @@
 """Pydantic schemas for LLM inputs, structured outputs, and citations."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -15,11 +16,11 @@ class ChatResponse(BaseModel):
     """Structured response format returned by the RAG Chat Agent."""
 
     answer: str = Field(description="Synthesized conversational answer")
-    citations: List[CitationItem] = Field(
+    citations: list[CitationItem] = Field(
         default_factory=list,
         description="Structured citations payload (PROJECT.md §12)",
     )
-    confidence_score: Optional[float] = Field(
+    confidence_score: float | None = Field(
         default=None,
         description="Internal grounding confidence score (0.0 to 1.0)",
     )
@@ -29,7 +30,7 @@ class LLMGenerationResult(BaseModel):
     """Metadata wrapper returned by the OpenRouter client."""
 
     raw_text: str
-    parsed_json: Optional[Dict[str, Any]] = None
+    parsed_json: dict[str, Any] | None = None
     model_used: str
     prompt_tokens: int = 0
     completion_tokens: int = 0

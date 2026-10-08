@@ -2,4 +2,4 @@
 
 from app.db.models import Base, ChatLog, Chunk, Document, FinancialMetric
 
-__all__ = ["Base", "Document", "FinancialMetric", "Chunk", "ChatLog"]
+__all__ = ["Base", "ChatLog", "Chunk", "Document", "FinancialMetric"]

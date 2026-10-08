@@ -2,12 +2,13 @@
 Conversational RAG Chat API Endpoint.
 
 WHY BUFFERED CITATION DELIVERY (PROJECT.md §12):
-For v1, delivering a complete structured response containing both the answer 
+For v1, delivering a complete structured response containing both the answer
 and citation metadata array ensures atomic provenance rendering on the frontend.
 """
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db.session import get_db_session
 from app.llm.schemas import ChatResponse
 from app.services.chat_service import ChatQueryRequest, ChatService

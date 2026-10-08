@@ -1,6 +1,5 @@
 """Application settings and constants configuration."""
 
-from typing import List
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,7 +17,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Investor Intelligence Platform"
     APP_ENV: str = Field(default="development", description="Runtime environment")
     PORT: int = Field(default=8000, description="Backend server port")
-    ALLOWED_ORIGINS: List[str] = Field(
+    ALLOWED_ORIGINS: list[str] = Field(
         default=["http://localhost:3000"],
         description="Allowed CORS origin domains",
     )
@@ -30,7 +29,7 @@ class Settings(BaseSettings):
     )
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     OPENROUTER_DEFAULT_MODEL: str = "deepseek/deepseek-v4-flash:free"
-    OPENROUTER_FALLBACK_MODELS: List[str] = [
+    OPENROUTER_FALLBACK_MODELS: list[str] = [
         "moonshotai/kimi-k2.6:free",
         "nex-agi/nex-n2-pro:free",
         "openrouter/free",

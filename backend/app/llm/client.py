@@ -2,9 +2,11 @@
 
 import asyncio
 import json
-from typing import Any, Dict, List, Optional, Type, TypeVar
+from typing import Any, TypeVar
+
 import httpx
 from pydantic import BaseModel
+
 from app.core.config import settings
 from app.llm.schemas import LLMGenerationResult
 
@@ -14,7 +16,7 @@ T = TypeVar("T", bound=BaseModel)
 class OpenRouterClient:
     """Async HTTP client for OpenRouter with fallback chains and backoff."""
 
-    def __init__(self, api_key: Optional[str] = None) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or settings.OPENROUTER_API_KEY
         self.base_url = settings.OPENROUTER_BASE_URL
         self.primary_model = settings.OPENROUTER_DEFAULT_MODEL
@@ -22,7 +24,7 @@ class OpenRouterClient:
             m for m in settings.OPENROUTER_FALLBACK_MODELS if m != self.primary_model
         ]
 
-    def _get_headers(self) -> Dict[str, str]:
+    def _get_headers(self) -> dict[str, str]:
         """Generate OpenRouter authentication and attribution headers."""
         headers = {
             "Content-Type": "application/json",
@@ -35,21 +37,21 @@ class OpenRouterClient:
 
     async def generate(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         temperature: float = 0.1,
         max_tokens: int = 1500,
-        response_format: Optional[Dict[str, str]] = None,
+        response_format: dict[str, str] | None = None,
         max_retries_per_model: int = 2,
     ) -> LLMGenerationResult:
         """Send chat completion request with multi-model fallback on 429/5xx errors."""
-        last_exception: Optional[Exception] = None
+        last_exception: Exception | None = None
 
         async with httpx.AsyncClient(timeout=45.0) as client:
             # Try each model in the fallback chain in order
             for model_id in self.fallback_chain:
                 for attempt in range(max_retries_per_model):
                     try:
-                        payload: Dict[str, Any] = {
+                        payload: dict[str, Any] = {
                             "model": model_id,
                             "messages": messages,
                             "temperature": temperature,
@@ -79,9 +81,7 @@ class OpenRouterClient:
                         # Extract text and token usage
                         choices = data.get("choices", [])
                         if not choices:
-                            raise ValueError(
-                                f"No completion choices returned by model {model_id}"
-                            )
+                            raise ValueError(f"No completion choices returned by model {model_id}")
 
                         raw_content = choices[0].get("message", {}).get("content", "")
                         usage = data.get("usage", {})
@@ -94,7 +94,11 @@ class OpenRouterClient:
                             total_tokens=usage.get("total_tokens", 0),
                         )
 
-                    except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
+                    except (
+                        httpx.HTTPStatusError,
+                        httpx.RequestError,
+                        ValueError,
+                    ) as exc:
                         last_exception = exc
                         wait_seconds = (2**attempt) + 0.5
                         print(
@@ -106,14 +110,12 @@ class OpenRouterClient:
                     f"❌ [OpenRouter] Exhausted retries for '{model_id}'. Failing over to next fallback model..."
                 )
 
-        raise RuntimeError(
-            f"All models in fallback chain failed. Last error: {last_exception}"
-        )
+        raise RuntimeError(f"All models in fallback chain failed. Last error: {last_exception}")
 
     async def generate_structured(
         self,
-        messages: List[Dict[str, str]],
-        schema: Type[T],
+        messages: list[dict[str, str]],
+        schema: type[T],
         temperature: float = 0.0,
         max_tokens: int = 2000,
     ) -> T:
@@ -133,8 +135,7 @@ class OpenRouterClient:
                 cleaned_text = cleaned_text[7:]
             elif cleaned_text.startswith("```"):
                 cleaned_text = cleaned_text[3:]
-            if cleaned_text.endswith("```"):
-                cleaned_text = cleaned_text[:-3]
+            cleaned_text = cleaned_text.removesuffix("```")
 
             parsed_dict = json.loads(cleaned_text.strip())
             return schema.model_validate(parsed_dict)

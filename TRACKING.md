@@ -208,12 +208,16 @@ flowchart TD
 ---
 
 ### Phase 1: PDF Ingestion Engine & Layout-Aware Docling Parser
-- [ ] **1.1 Ingestion API Endpoint (`POST /api/documents/upload`)**
-  - [ ] Accept `file` (PDF), `company` (string), `fiscal_year` (int).
-  - [ ] Calculate SHA-256 `content_hash` of uploaded PDF.
-  - [ ] Check for existing document by `content_hash` (Idempotency handler: upsert or skip duplicate).
-  - [ ] Upload raw PDF file to Supabase Storage.
-  - [ ] Insert record into `documents` table.
+- [x] **1.1 Ingestion API Endpoint & Pre-Ingestion Validator (`POST /api/documents/upload`)**
+  - [x] Pre-ingestion validation (`validate_upload` in `app/services/upload_validator.py`):
+    - [x] Text layer validation (rejects scanned/image-only PDFs < 200 chars with HTTP 422).
+    - [x] Form type classification (supports `10-K`, `10-Q`, `20-F`; rejects unsupported/unknown with HTTP 422).
+    - [x] Fiscal year end date metadata extraction.
+  - [x] Accept `file` (PDF), `company` (string), `fiscal_year` (int).
+  - [x] Calculate SHA-256 `content_hash` of uploaded PDF.
+  - [x] Check for existing document by `content_hash` (Idempotency handler: upsert or skip duplicate).
+  - [x] Insert record into `documents` table with `form_type` and `fiscal_year_end`.
+  - [x] Pick accounting alias map based on `form_type` (US GAAP for 10-K/10-Q, IFRS for 20-F).
 - [ ] **1.2 Layout-Aware Parsing with Docling**
   - [ ] Integrate Docling parser to extract document layout tree.
   - [ ] Preserve hierarchical section paths (e.g., `Part I > Item 1. Business`).

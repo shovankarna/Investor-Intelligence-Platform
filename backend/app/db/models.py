@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from decimal import Decimal
-from typing import List, Optional
+
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     DateTime,
@@ -21,8 +21,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy declarative database models."""
 
-    pass
-
 
 class Document(Base):
     """Stores uploaded financial filing metadata."""
@@ -32,8 +30,10 @@ class Document(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     company: Mapped[str] = mapped_column(String, nullable=False, index=True)
     fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    form_type: Mapped[str] = mapped_column(String(20), nullable=False, default="10-K")
+    fiscal_year_end: Mapped[str | None] = mapped_column(String(100), nullable=True)
     filename: Mapped[str] = mapped_column(String, nullable=False)
-    storage_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    storage_path: Mapped[str | None] = mapped_column(String, nullable=True)
     content_hash: Mapped[str] = mapped_column(
         String, nullable=False, unique=True, index=True
     )  # SHA-256 for idempotency
@@ -44,12 +44,12 @@ class Document(Base):
     )
 
     # Relationships
-    metrics: Mapped[List["FinancialMetric"]] = relationship(
+    metrics: Mapped[list["FinancialMetric"]] = relationship(
         "FinancialMetric",
         back_populates="document",
         cascade="all, delete-orphan",
     )
-    chunks: Mapped[List["Chunk"]] = relationship(
+    chunks: Mapped[list["Chunk"]] = relationship(
         "Chunk",
         back_populates="document",
         cascade="all, delete-orphan",
@@ -81,11 +81,9 @@ class FinancialMetric(Base):
     source_page: Mapped[int] = mapped_column(
         Integer, nullable=False
     )  # Strict non-nullable provenance (AGENT.md §1 Rule 2)
-    source_chunk_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    source_chunk_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    __table_args__ = (
-        UniqueConstraint("document_id", "metric_name", name="uq_document_metric"),
-    )
+    __table_args__ = (UniqueConstraint("document_id", "metric_name", name="uq_document_metric"),)
 
     # Relationship
     document: Mapped["Document"] = relationship("Document", back_populates="metrics")
@@ -96,9 +94,7 @@ class Chunk(Base):
 
     __tablename__ = "chunks"
 
-    id: Mapped[str] = mapped_column(
-        String, primary_key=True
-    )  # e.g., '{doc_id}_p{page}_c{seq}'
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # e.g., '{doc_id}_p{page}_c{seq}'
     document_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("documents.id", ondelete="CASCADE"),
@@ -111,14 +107,12 @@ class Chunk(Base):
     section_path: Mapped[str] = mapped_column(
         Text, nullable=False
     )  # e.g., 'Part I > Item 1. Business'
-    element_type: Mapped[str] = mapped_column(
-        String, nullable=False
-    )  # 'prose' or 'table'
+    element_type: Mapped[str] = mapped_column(String, nullable=False)  # 'prose' or 'table'
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    tsv_content: Mapped[Optional[str]] = mapped_column(
+    tsv_content: Mapped[str | None] = mapped_column(
         TSVECTOR, nullable=True
     )  # Full-text search vector
-    embedding: Mapped[Optional[List[float]]] = mapped_column(
+    embedding: Mapped[list[float] | None] = mapped_column(
         Vector(384), nullable=True
     )  # BAAI/bge-small-en-v1.5 (384-d)
 
@@ -134,12 +128,10 @@ class ChatLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
-    query_type: Mapped[Optional[str]] = mapped_column(
+    query_type: Mapped[str | None] = mapped_column(
         String, nullable=True
     )  # 'STRUCTURED', 'NARRATIVE', 'HYBRID'
-    retrieved_chunk_ids: Mapped[Optional[List[str]]] = mapped_column(
-        ARRAY(String), nullable=True
-    )
+    retrieved_chunk_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

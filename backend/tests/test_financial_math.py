@@ -4,6 +4,7 @@ Verifies Profit Margins, Free Cash Flow, Debt-to-Equity, ROE, ROA, and YoY Growt
 """
 
 from decimal import Decimal
+
 from app.services.financial_math import FinancialMathService
 
 
@@ -11,10 +12,10 @@ def test_margin_calculations() -> None:
     """Test Gross, Operating, and Net Profit Margins with known figures."""
     # Test Data representing $383,285M revenue (Apple FY2023 sample)
     metrics = {
-        "total_revenue": Decimal("383285"),
-        "gross_profit": Decimal("169148"),
-        "operating_income": Decimal("114301"),
-        "net_income": Decimal("96995"),
+        "total_revenue": Decimal(383285),
+        "gross_profit": Decimal(169148),
+        "operating_income": Decimal(114301),
+        "net_income": Decimal(96995),
     }
 
     ratios = FinancialMathService.calculate_ratios(metrics)
@@ -30,21 +31,21 @@ def test_margin_calculations() -> None:
 def test_free_cash_flow() -> None:
     """Test Free Cash Flow: Operating Cash Flow - CapEx."""
     metrics = {
-        "operating_cash_flow": Decimal("110543"),
-        "capital_expenditures": Decimal("10959"),
+        "operating_cash_flow": Decimal(110543),
+        "capital_expenditures": Decimal(10959),
     }
 
     ratios = FinancialMathService.calculate_ratios(metrics)
-    assert ratios.free_cash_flow == Decimal("99584")
+    assert ratios.free_cash_flow == Decimal(99584)
 
 
 def test_debt_to_equity_and_roe() -> None:
     """Test balance sheet and return ratios (Debt-to-Equity, ROE, ROA)."""
     metrics = {
-        "net_income": Decimal("96995"),
-        "total_assets": Decimal("352583"),
-        "total_liabilities": Decimal("290437"),
-        "stockholders_equity": Decimal("62146"),
+        "net_income": Decimal(96995),
+        "total_assets": Decimal(352583),
+        "total_liabilities": Decimal(290437),
+        "stockholders_equity": Decimal(62146),
     }
 
     ratios = FinancialMathService.calculate_ratios(metrics)
@@ -60,10 +61,10 @@ def test_debt_to_equity_and_roe() -> None:
 def test_safe_division_by_zero() -> None:
     """Verify that zero revenue or zero equity returns None instead of raising an unhandled exception."""
     metrics = {
-        "total_revenue": Decimal("0"),
-        "gross_profit": Decimal("1000"),
-        "stockholders_equity": Decimal("0"),
-        "net_income": Decimal("500"),
+        "total_revenue": Decimal(0),
+        "gross_profit": Decimal(1000),
+        "stockholders_equity": Decimal(0),
+        "net_income": Decimal(500),
     }
 
     ratios = FinancialMathService.calculate_ratios(metrics)
@@ -75,12 +76,12 @@ def test_safe_division_by_zero() -> None:
 def test_yoy_growth_calculation() -> None:
     """Test Year-over-Year (YoY) Growth calculation between FY2023 and FY2024."""
     fy2023 = {
-        "total_revenue": Decimal("383285"),
-        "net_income": Decimal("96995"),
+        "total_revenue": Decimal(383285),
+        "net_income": Decimal(96995),
     }
     fy2024 = {
-        "total_revenue": Decimal("391035"),
-        "net_income": Decimal("93736"),
+        "total_revenue": Decimal(391035),
+        "net_income": Decimal(93736),
     }
 
     growth = FinancialMathService.calculate_yoy_growth(fy2024, fy2023)

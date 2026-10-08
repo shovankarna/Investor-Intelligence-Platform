@@ -7,24 +7,28 @@ must return structured citation pills linking directly to the source page number
 and excerpt so analysts can verify claims against official SEC filings.
 """
 
-from typing import List, Optional
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import settings
 from app.db.models import ChatLog, Document, FinancialMetric
 from app.llm.client import llm_client
-from app.llm.schemas import ChatResponse, CitationItem
+from app.llm.schemas import ChatResponse
 from app.rag.retriever import HybridRetriever
 from app.rag.router import QueryPlan, QueryRouter, QueryType
-from app.services.financial_math import FinancialMathService
 
 
 class ChatQueryRequest(BaseModel):
     """Schema for incoming user chat questions."""
-    question: str = Field(..., min_length=2, description="Investor question (e.g. 'What was Apple's 2024 revenue?')")
-    company: Optional[str] = Field(None, description="Optional company filter")
-    fiscal_year: Optional[int] = Field(None, description="Optional fiscal year filter")
+
+    question: str = Field(
+        ...,
+        min_length=2,
+        description="Investor question (e.g. 'What was Apple's 2024 revenue?')",
+    )
+    company: str | None = Field(None, description="Optional company filter")
+    fiscal_year: int | None = Field(None, description="Optional fiscal year filter")
 
 
 class ChatService:
@@ -60,12 +64,14 @@ RULES:
         target_company = request.company or (plan.companies[0] if plan.companies else None)
         target_year = request.fiscal_year or plan.fiscal_year
 
-        context_blocks: List[str] = []
-        retrieved_chunk_ids: List[str] = []
+        context_blocks: list[str] = []
+        retrieved_chunk_ids: list[str] = []
 
         # Step 2: Path A (Structured Metrics from Postgres)
         if plan.query_type in [QueryType.STRUCTURED, QueryType.HYBRID]:
-            stmt = select(FinancialMetric).join(Document, FinancialMetric.document_id == Document.id)
+            stmt = select(FinancialMetric).join(
+                Document, FinancialMetric.document_id == Document.id
+            )
             if target_company:
                 stmt = stmt.where(Document.company.ilike(f"%{target_company}%"))
             if target_year:
@@ -79,7 +85,10 @@ RULES:
                     f"- {m.metric_name}: {m.value} {m.unit} (Source Page: {m.source_page})"
                     for m in metrics
                 ]
-                context_blocks.append("### Structured Financial Line Items (from verified database):\n" + "\n".join(metric_lines))
+                context_blocks.append(
+                    "### Structured Financial Line Items (from verified database):\n"
+                    + "\n".join(metric_lines)
+                )
 
         # Step 3: Path B (Narrative Chunks via Hybrid Search + Cross-Encoder)
         if plan.query_type in [QueryType.NARRATIVE, QueryType.HYBRID]:
@@ -99,15 +108,21 @@ RULES:
 
             if reranked:
                 narrative_lines = []
-                for chunk, score in reranked:
+                for chunk, _score in reranked:
                     retrieved_chunk_ids.append(chunk.id)
                     narrative_lines.append(
                         f"[Chunk {chunk.id} | Page {chunk.page_number} | Section: {chunk.section_path}]:\n{chunk.content}\n"
                     )
-                context_blocks.append("### Qualitative & Narrative Filing Excerpts:\n" + "\n".join(narrative_lines))
+                context_blocks.append(
+                    "### Qualitative & Narrative Filing Excerpts:\n" + "\n".join(narrative_lines)
+                )
 
         # Step 4: Construct LLM Prompt
-        combined_context = "\n\n".join(context_blocks) if context_blocks else "No relevant filings found for this query."
+        combined_context = (
+            "\n\n".join(context_blocks)
+            if context_blocks
+            else "No relevant filings found for this query."
+        )
         user_prompt = f"""
 Investor Question: {request.question}
 

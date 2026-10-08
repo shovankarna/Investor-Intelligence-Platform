@@ -1,9 +1,11 @@
 """FastAPI Application Entry Point with CORS, Lifespan Hooks, and Mounted Routers."""
 
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Dict
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.api.metrics import router as metrics_router
@@ -42,7 +44,7 @@ app.include_router(chat_router, prefix="/api/chat", tags=["Conversational RAG"])
 
 
 @app.get("/health", tags=["System"])
-async def health_check() -> Dict[str, str]:
+async def health_check() -> dict[str, str]:
     """Basic health check endpoint to verify backend API availability."""
     return {
         "status": "healthy",
@@ -52,7 +54,7 @@ async def health_check() -> Dict[str, str]:
 
 
 @app.get("/", tags=["System"])
-async def root() -> Dict[str, str]:
+async def root() -> dict[str, str]:
     """Root endpoint welcoming the user and pointing to interactive docs."""
     return {
         "message": f"Welcome to {settings.APP_NAME} API",

@@ -2,23 +2,26 @@
 Document API Endpoints.
 
 WHY WE KEEP ROUTE HANDLERS THIN (AGENT.md §4):
-Route handlers should ONLY handle HTTP concerns:
+Route handlers handle HTTP concerns:
 1. Parsing request parameters and multipart form-data.
-2. Injecting database session dependencies.
-3. Delegating the work to the service layer (`DocumentService`).
-4. Returning formatted response schemas.
-
-Business logic (hashing, file persistence, deduplication) belongs in `services/`.
+2. Invoking upload validation before ingestion.
+3. Injecting database session dependencies.
+4. Delegating the work to the service layer (`DocumentService`).
+5. Returning formatted response schemas.
 """
 
-from typing import List
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+import os
+import tempfile
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db.models import Document
 from app.db.session import get_db_session
 from app.models.document import DocumentCreate, DocumentResponse, DocumentUploadResult
 from app.services.document_service import DocumentService
+from app.services.upload_validator import validate_upload
 
 # Create router instance for document resources
 router = APIRouter()
@@ -37,27 +40,60 @@ async def upload_document(
     session: AsyncSession = Depends(get_db_session),
 ) -> DocumentUploadResult:
     """
-    Accepts a 10-K / Annual Report PDF with user tagging (ADR-3),
-    computes its SHA-256 hash for idempotency, and records it in the database.
+    Accepts a 10-K / 10-Q / 20-F Annual Report PDF with user tagging (ADR-3),
+    validates the text layer and form type (returning 422 if invalid),
+    computes its SHA-256 hash for idempotency, and ingests it into the platform.
     """
-    # 1. Package metadata into Pydantic schema for validation
-    metadata = DocumentCreate(company=company, fiscal_year=fiscal_year)
+    # 1. Basic format validation
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file format. Only PDF files are supported.",
+        )
 
-    # 2. Delegate to DocumentService for hashing and database persistence
+    # 2. Read file content
+    file_bytes = await file.read()
+    if len(file_bytes) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded PDF file is empty.",
+        )
+
+    # 3. Save temporarily and run pre-ingestion upload validation (Check 1: text layer, Check 2: form type, Check 3: fiscal year end)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(file_bytes)
+        tmp_path = tmp_file.name
+
+    try:
+        val_result = validate_upload(tmp_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    # 4. Package validated metadata into Pydantic schema
+    metadata = DocumentCreate(
+        company=company,
+        fiscal_year=fiscal_year,
+        form_type=val_result.form_type,
+        fiscal_year_end=val_result.fiscal_year_end,
+    )
+
+    # 5. Delegate to DocumentService for hashing, metric extraction, embedding, and persistence
     doc, is_duplicate = await DocumentService.process_and_save_document(
         session=session,
         file=file,
         metadata=metadata,
+        file_bytes=file_bytes,
     )
 
-    # 3. Create context-aware status message for the user
+    # 6. Create context-aware status message for the user
     message = (
-        f"Document '{doc.filename}' was already processed previously (idempotent skip)."
+        f"Document '{doc.filename}' ({doc.form_type}) was already processed previously (idempotent skip)."
         if is_duplicate
-        else f"Document '{doc.filename}' uploaded successfully for {doc.company} (FY{doc.fiscal_year})."
+        else f"Document '{doc.filename}' ({doc.form_type}) uploaded successfully for {doc.company} (FY{doc.fiscal_year})."
     )
 
-    # 4. Return serialized response
+    # 7. Return serialized response
     return DocumentUploadResult(
         document=DocumentResponse.model_validate(doc),
         is_duplicate=is_duplicate,
@@ -67,12 +103,12 @@ async def upload_document(
 
 @router.get(
     "/",
-    response_model=List[DocumentResponse],
+    response_model=list[DocumentResponse],
     summary="List all uploaded financial filings",
 )
 async def list_documents(
     session: AsyncSession = Depends(get_db_session),
-) -> List[DocumentResponse]:
+) -> list[DocumentResponse]:
     """
     Returns all ingested financial filings stored in PostgreSQL,
     ordered by upload timestamp (newest first).

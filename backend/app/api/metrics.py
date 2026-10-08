@@ -8,10 +8,11 @@ in plain Python code. This guarantees 100% mathematical integrity with zero extr
 """
 
 from decimal import Decimal
-from typing import Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db.models import Document, FinancialMetric
 from app.db.session import get_db_session
 from app.models.metrics import (
@@ -53,8 +54,8 @@ async def get_document_financials(
     metrics_list = metrics_res.scalars().all()
 
     # 3. Build dictionary of metric_name -> Decimal
-    raw_dict: Dict[str, RawMetricResponse] = {}
-    math_dict: Dict[str, Decimal] = {}
+    raw_dict: dict[str, RawMetricResponse] = {}
+    math_dict: dict[str, Decimal] = {}
     for m in metrics_list:
         raw_dict[m.metric_name] = RawMetricResponse.model_validate(m)
         math_dict[m.metric_name] = m.value
@@ -63,10 +64,9 @@ async def get_document_financials(
     ratios: CalculatedRatios = FinancialMathService.calculate_ratios(math_dict)
 
     # 5. Check if prior year document exists for YoY Growth
-    yoy_growth: Dict[str, Optional[Decimal]] = {}
-    prior_doc_query = (
-        select(Document)
-        .where(Document.company == doc.company, Document.fiscal_year == doc.fiscal_year - 1)
+    yoy_growth: dict[str, Decimal | None] = {}
+    prior_doc_query = select(Document).where(
+        Document.company == doc.company, Document.fiscal_year == doc.fiscal_year - 1
     )
     prior_doc_res = await session.execute(prior_doc_query)
     prior_doc = prior_doc_res.scalars().first()
@@ -91,13 +91,13 @@ async def get_document_financials(
 
 @router.get(
     "/company/{company}",
-    response_model=List[CompanyFinancialSummary],
+    response_model=list[CompanyFinancialSummary],
     summary="Get multi-year financial history for a company",
 )
 async def get_company_history(
     company: str,
     session: AsyncSession = Depends(get_db_session),
-) -> List[CompanyFinancialSummary]:
+) -> list[CompanyFinancialSummary]:
     """
     Returns multi-year financial summaries and computed ratios across all available
     fiscal years for a company.
@@ -117,8 +117,8 @@ async def get_company_history(
             detail=f"No filings found for company '{company}'.",
         )
 
-    summaries: List[CompanyFinancialSummary] = []
-    prior_math_dict: Optional[Dict[str, Decimal]] = None
+    summaries: list[CompanyFinancialSummary] = []
+    prior_math_dict: dict[str, Decimal] | None = None
 
     for doc in docs:
         m_query = select(FinancialMetric).where(FinancialMetric.document_id == doc.id)

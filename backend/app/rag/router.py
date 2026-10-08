@@ -9,24 +9,30 @@ WHY QUERY ROUTING IS CRITICAL (ADR-1 & PROJECT.md §5.1):
    the optimal retrieval strategy: STRUCTURED, NARRATIVE, or HYBRID.
 """
 
-from enum import Enum
-from typing import List, Optional
+from enum import StrEnum
+
 from pydantic import BaseModel, Field
+
 from app.llm.client import llm_client
 
 
-class QueryType(str, Enum):
+class QueryType(StrEnum):
     STRUCTURED = "STRUCTURED"  # Quantitative/metric lookups -> SQL
-    NARRATIVE = "NARRATIVE"    # Qualitative, risk, strategy -> Vector search
-    HYBRID = "HYBRID"          # Analytical questions needing numbers + context
+    NARRATIVE = "NARRATIVE"  # Qualitative, risk, strategy -> Vector search
+    HYBRID = "HYBRID"  # Analytical questions needing numbers + context
 
 
 class QueryPlan(BaseModel):
     """Execution plan generated for an incoming user question."""
+
     query_type: QueryType = Field(..., description="Chosen retrieval strategy")
-    companies: List[str] = Field(default_factory=list, description="Target company names identified in query")
-    fiscal_year: Optional[int] = Field(None, description="Target fiscal year if specified")
-    metrics: List[str] = Field(default_factory=list, description="Target metric keys (e.g. ['total_revenue'])")
+    companies: list[str] = Field(
+        default_factory=list, description="Target company names identified in query"
+    )
+    fiscal_year: int | None = Field(None, description="Target fiscal year if specified")
+    metrics: list[str] = Field(
+        default_factory=list, description="Target metric keys (e.g. ['total_revenue'])"
+    )
     reasoning: str = Field(..., description="Brief rationale for this routing decision")
 
 

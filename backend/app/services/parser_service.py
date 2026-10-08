@@ -7,8 +7,8 @@ WHY DOCLING OVER STANDARD OCR / PYPDF:
 3. Provenance Extraction: Captures page numbers and bounding box locations for every extracted element.
 """
 
-from typing import List
 from docling.document_converter import DocumentConverter
+
 from app.models.parser import ParsedDocumentResult, ParsedProse, ParsedTable
 
 
@@ -37,13 +37,13 @@ class ParserService:
     ) -> ParsedDocumentResult:
         """
         Parses a PDF filing and separates its contents into structured tables and prose blocks.
-        
+
         Args:
             file_path_or_bytes: Absolute file path of the PDF.
             document_id: Database ID of the parent document.
             company: Company name (e.g., 'Apple').
             fiscal_year: Fiscal year (e.g., 2024).
-            
+
         Returns:
             ParsedDocumentResult with separate tables and prose_blocks lists.
         """
@@ -51,15 +51,15 @@ class ParserService:
         conv_result = converter.convert(file_path_or_bytes)
         doc = conv_result.document
 
-        tables: List[ParsedTable] = []
-        prose_blocks: List[ParsedProse] = []
-        
+        tables: list[ParsedTable] = []
+        prose_blocks: list[ParsedProse] = []
+
         current_section = "General"
         table_idx = 0
         block_idx = 0
 
         # Iterate over all document elements preserving reading hierarchy
-        for item, level in doc.iterate_items():
+        for item, _level in doc.iterate_items():
             # Safely extract page number from provenance metadata
             page_no = 1
             if getattr(item, "prov", None) and len(item.prov) > 0:
@@ -69,9 +69,11 @@ class ParserService:
             if hasattr(item, "export_to_markdown") and hasattr(item, "data"):
                 md_table = item.export_to_markdown()
                 html_table = item.export_to_html() if hasattr(item, "export_to_html") else None
-                
+
                 num_rows = len(item.data.grid) if hasattr(item.data, "grid") else 0
-                num_cols = len(item.data.grid[0]) if (num_rows > 0 and hasattr(item.data, "grid")) else 0
+                num_cols = (
+                    len(item.data.grid[0]) if (num_rows > 0 and hasattr(item.data, "grid")) else 0
+                )
 
                 tables.append(
                     ParsedTable(
@@ -93,7 +95,11 @@ class ParserService:
                     continue
 
                 # Determine if this element acts as a section header
-                is_header = getattr(item, "label", "") in ["section_header", "title", "heading"]
+                is_header = getattr(item, "label", "") in [
+                    "section_header",
+                    "title",
+                    "heading",
+                ]
                 if is_header:
                     current_section = text_content
 
