@@ -2,7 +2,7 @@
 
 > **Status:** Active Project Tracking Document  
 > **Source Spec:** [`PROJECT.md`](file:///d:/Dev/Projects-AI/RAG-Project/RAG-Project-1/Investor-Intelligence-Platform/PROJECT.md)  
-> **Last Updated:** 2026-09-21  
+> **Last Updated:** 2026-10-08  
 
 ---
 
@@ -37,6 +37,8 @@ The **Investor Intelligence Platform** is a dual-path RAG and financial analytic
 - **ADR-4 (Pure Arithmetic in Code):** Financial ratios (Margins, FCF, Debt-to-Equity, ROE, ROA, YoY Growth) are calculated deterministically in application code, never generated or persisted by LLMs.
 - **ADR-5 (OpenRouter Unified Stack):** All LLM generation routes through OpenRouter free-tier models with dynamic multi-tier fallback chains.
 - **ADR-6 (Unified Database):** Both structured records and vector embeddings live inside a single Supabase Postgres instance utilizing the `pgvector` extension and `tsvector` full-text search.
+- **ADR-7 (Pre-Ingestion Upload Validation):** Prior to ingestion, uploaded PDFs must pass text-density validation (>= 200 chars on first 3 pages) and form-type classification (`10-K`, `10-Q`, `20-F`). Non-text/scanned PDFs and unsupported forms are rejected with HTTP 422. Form type determines accounting alias mapping (US GAAP vs IFRS).
+- **ADR-8 (LLM-First Metric Extraction with Deterministic Verification):** Candidate tables are filtered down to primary financial statements (Operations, Balance Sheet, Cash Flows); all footnote/non-primary tables are pruned. All selected statements are batched into ONE LLM call with unscaled printed values. Returned numbers must pass verbatim grounding checks against source table text. Accounting equations (`Assets == Liabilities + Equity`, `Gross Profit == Revenue - COGS`) are validated in Python with single-statement retry. Unit scaling is applied deterministically in Python post-verification.
 
 ---
 
@@ -52,7 +54,7 @@ flowchart TD
     end
 
     subgraph Server["Backend API (FastAPI on Google Cloud Run)"]
-        EP_ING["/api/ingest (Docling Parser)"]
+        EP_ING["/api/documents/upload (Upload Validator + Docling)"]
         EP_MET["/api/metrics (CRUD & Financial Math)"]
         EP_CHAT["/api/chat (Router + Hybrid Search + LLM)"]
         
@@ -61,8 +63,8 @@ flowchart TD
     end
 
     subgraph DB["Postgres + pgvector (Supabase Free Tier)"]
-        TBL_DOCS["documents (content_hash)"]
-        TBL_MET["financial_metrics (raw line items)"]
+        TBL_DOCS["documents (content_hash, form_type, fiscal_year_end)"]
+        TBL_MET["financial_metrics (verified, low_confidence)"]
         TBL_CHUNKS["chunks (embedding vector + tsvector)"]
         TBL_LOGS["chat_logs"]
         SUPA_STORE["Supabase Storage (Original PDFs)"]
@@ -79,8 +81,8 @@ flowchart TD
     UI_UP --> EP_ING
     EP_ING --> SUPA_STORE
     EP_ING --> TBL_DOCS
-    EP_ING -->|Table Stream| OR_GATEWAY
-    OR_GATEWAY -->|Structured JSON| TBL_MET
+    EP_ING -->|Primary Statement Stream (1 Batched Call)| OR_GATEWAY
+    OR_GATEWAY -->|Printed Unscaled JSON| TBL_MET
     EP_ING -->|Narrative Stream| MOD_EMB
     MOD_EMB --> TBL_CHUNKS
 
@@ -103,11 +105,13 @@ flowchart TD
 |---|---|---|---|
 | **Backend API** | FastAPI (Python 3.11+) | Google Cloud Run Container | Free Tier (180k vCPU-s, 360k GiB-s/mo) |
 | **PDF Parser** | Docling | In-Process Backend Worker | Open-source, layout-aware, preserves tables/headings |
+| **Pre-Ingestion Validator** | `upload_validator.py` | In-Process Backend Service | Rejects scanned PDFs (<200 chars) & unsupported forms (HTTP 422) |
 | **Text Embedding** | `BAAI/bge-small-en-v1.5` | In-Process `sentence-transformers` | Free, runs in memory (~130MB footprint) |
 | **Cross-Encoder Reranker** | `BAAI/bge-reranker-base` | In-Process `sentence-transformers` | Free, runs in memory (~400MB footprint) |
 | **Database & Vectors** | Supabase Postgres + `pgvector` | Managed Supabase Cloud | Free Tier (500MB storage, pgvector enabled) *(inferred — verify against Supabase's current published limits before relying on this)* |
 | **File Storage** | Supabase Storage | Managed Supabase Cloud | Free Tier (1GB storage for uploaded PDFs) *(inferred — verify against Supabase's current published limits before relying on this)* |
 | **LLM Provider** | OpenRouter Free Tier | External HTTP REST API | 20 req/min global limit; multi-model fallback |
+| **Metric Extraction** | LLM + Deterministic Verification | OpenRouter + Python (`Decimal`) | 1 batched call, verbatim grounding, accounting checks retry, unit scaling |
 | **Frontend Web App** | Next.js 14+ / React / TailwindCSS | Vercel Deployment | Free Tier (Hobby) |
 
 ---
@@ -120,6 +124,8 @@ flowchart TD
 - `id` (SERIAL PRIMARY KEY)
 - `company` (TEXT NOT NULL)
 - `fiscal_year` (INTEGER NOT NULL)
+- `form_type` (VARCHAR(20) NOT NULL DEFAULT '10-K') — `'10-K'`, `'10-Q'`, `'20-F'`
+- `fiscal_year_end` (VARCHAR(100)) — extracted FYE date string (e.g. `'September 30, 2023'`)
 - `filename` (TEXT NOT NULL)
 - `storage_path` (TEXT)
 - `content_hash` (TEXT UNIQUE NOT NULL) — SHA256 hash for idempotent upsert
@@ -129,11 +135,13 @@ flowchart TD
 - `id` (SERIAL PRIMARY KEY)
 - `document_id` (INTEGER REFERENCES documents(id) ON DELETE CASCADE)
 - `metric_name` (TEXT NOT NULL) — standard snake_case key
-- `value` (NUMERIC NOT NULL)
-- `unit` (TEXT NOT NULL) — e.g., `'USD_millions'`, `'USD_thousands'`, `'USD_units'`
+- `value` (NUMERIC NOT NULL) — base units in Decimal
+- `unit` (TEXT NOT NULL) — e.g., `'USD_units'`, `'USD_millions'`, `'USD_thousands'`
 - `currency` (TEXT NOT NULL DEFAULT `'USD'`)
 - `source_page` (INTEGER NOT NULL)
 - `source_chunk_id` (TEXT)
+- `verified` (BOOLEAN NOT NULL DEFAULT TRUE) — verbatim grounding check result
+- `low_confidence` (BOOLEAN NOT NULL DEFAULT FALSE) — flagged if accounting checks failed after retry
 - *Constraint:* `UNIQUE (document_id, metric_name)`
 
 #### `chunks`
@@ -190,20 +198,20 @@ flowchart TD
 ## 4. Master Implementation Roadmap & Step-by-Step Tracker
 
 ### Phase 0: Project Foundations & Infrastructure Setup
-- [ ] **0.1 Repository & Workspace Structure**
-  - [ ] Initialize backend directory (`/backend`) with Python virtual environment.
+- [x] **0.1 Repository & Workspace Structure**
+  - [x] Initialize backend directory (`/backend`) with Python virtual environment.
   - [ ] Initialize frontend directory (`/frontend`) with Next.js App Router. (inferred — not in PROJECT.md, needs confirmation)
-  - [ ] Configure root-level `.gitignore`, `.env.example`, and development scripts.
-- [ ] **0.2 Database & Supabase Configuration**
-  - [ ] Create Supabase project in the chosen region. (touches PROJECT.md §11 Open Question: pick geographically close regions for Cloud Run and Supabase to minimize cross-service latency)
-  - [ ] Enable `pgvector` extension in Postgres (`CREATE EXTENSION IF NOT EXISTS vector;`).
-  - [ ] Execute SQL schema migrations for `documents`, `financial_metrics`, `chunks`, `chat_logs`.
-  - [ ] Create GIN index on `tsv_content` for full-text search and HNSW index on `embedding`.
+  - [x] Configure root-level `.gitignore`, `.env.example`, and development scripts (`pyproject.toml`, test suites).
+- [x] **0.2 Database & Supabase Configuration**
+  - [x] Create Supabase project in the chosen region. (touches PROJECT.md §11 Open Question: pick geographically close regions for Cloud Run and Supabase to minimize cross-service latency)
+  - [x] Enable `pgvector` extension in Postgres (`CREATE EXTENSION IF NOT EXISTS vector;`).
+  - [x] Execute SQL schema migrations for `documents`, `financial_metrics`, `chunks`, `chat_logs` (Alembic versions 001, 002, 003).
+  - [x] Create GIN index on `tsv_content` for full-text search and HNSW index on `embedding`.
   - [ ] Set up Supabase Storage bucket for PDF documents with access policies.
-- [ ] **0.3 OpenRouter Client & Resiliency Layer**
-  - [ ] Implement OpenRouter API client supporting structured JSON output and function calling.
-  - [ ] Implement fallback chain: `deepseek/deepseek-v4-flash:free` -> `moonshotai/kimi-k2.6:free` -> `nex-agi/nex-n2-pro:free` -> `openrouter/free`.
-  - [ ] Implement exponential backoff retry handler for HTTP 429 and 5xx responses.
+- [x] **0.3 OpenRouter Client & Resiliency Layer**
+  - [x] Implement OpenRouter API client supporting structured JSON output and function calling (`app/llm/client.py`).
+  - [x] Implement fallback chain: `deepseek/deepseek-v4-flash:free` -> `moonshotai/kimi-k2.6:free` -> `nex-agi/nex-n2-pro:free` -> `openrouter/free`.
+  - [x] Implement exponential backoff retry handler for HTTP 429 and 5xx responses.
 
 ---
 
@@ -218,30 +226,30 @@ flowchart TD
   - [x] Check for existing document by `content_hash` (Idempotency handler: upsert or skip duplicate).
   - [x] Insert record into `documents` table with `form_type` and `fiscal_year_end`.
   - [x] Pick accounting alias map based on `form_type` (US GAAP for 10-K/10-Q, IFRS for 20-F).
-- [ ] **1.2 Layout-Aware Parsing with Docling**
-  - [ ] Integrate Docling parser to extract document layout tree.
-  - [ ] Preserve hierarchical section paths (e.g., `Part I > Item 1. Business`).
-  - [ ] Extract page numbers per bounding block.
-  - [ ] Distinguish narrative text elements (headings, paragraphs) from tabular elements.
-- [ ] **1.3 Ingestion Stream Fork**
-  - [ ] Route all structured tables to the Table Ingestion / Metric Extraction pipeline.
-  - [ ] Route all narrative prose and headings to the Text Chunking & Embedding pipeline.
+- [x] **1.2 Layout-Aware Parsing with Docling**
+  - [x] Integrate Docling parser to extract document layout tree (`app/services/parser_service.py`).
+  - [x] Preserve hierarchical section paths (e.g., `Part I > Item 1. Business`).
+  - [x] Extract page numbers per bounding block.
+  - [x] Distinguish narrative text elements (headings, paragraphs) from tabular elements.
+- [x] **1.3 Ingestion Stream Fork**
+  - [x] Route all structured tables to the Table Ingestion / Metric Extraction pipeline.
+  - [x] Route all narrative prose and headings to the Text Chunking & Embedding pipeline.
 
 ---
 
 ### Phase 2: Narrative Chunking, Embedding & pgvector Storage
-- [ ] **2.1 Structure-Aware Chunking Strategy**
-  - [ ] Implement Markdown/heading-aware chunker respecting section boundaries.
-  - [ ] Enforce chunk token limits (target: 300–600 tokens with 10% overlap).
-  - [ ] Format whole tables as Markdown/HTML strings, guaranteeing zero mid-row splits.
-  - [ ] Tag every chunk with: `document_id`, `page_number`, `section_path`, `element_type`.
-- [ ] **2.2 Local Embedding Generation**
-  - [ ] Load `BAAI/bge-small-en-v1.5` in backend using `sentence-transformers`.
-  - [ ] Implement batched embedding generation for all document chunks.
-  - [ ] Normalize embeddings for cosine similarity.
-- [ ] **2.3 Batch Insertion to Supabase**
-  - [ ] Insert chunk records into `chunks` table with `tsv_content` and vector embeddings.
-  - [ ] Validate vector dimensions (384-d).
+- [x] **2.1 Structure-Aware Chunking Strategy**
+  - [x] Implement Markdown/heading-aware chunker respecting section boundaries (`app/rag/chunker.py`).
+  - [x] Enforce chunk token limits (target: 300–600 tokens with 10% overlap).
+  - [x] Format whole tables as Markdown/HTML strings, guaranteeing zero mid-row splits.
+  - [x] Tag every chunk with: `document_id`, `page_number`, `section_path`, `element_type`.
+- [x] **2.2 Local Embedding Generation**
+  - [x] Load `BAAI/bge-small-en-v1.5` in backend using `sentence-transformers` (`app/rag/embedder.py`).
+  - [x] Implement batched embedding generation for all document chunks.
+  - [x] Normalize embeddings for cosine similarity.
+- [x] **2.3 Batch Insertion to Supabase**
+  - [x] Insert chunk records into `chunks` table with `tsv_content` and vector embeddings (`app/services/document_service.py`).
+  - [x] Validate vector dimensions (384-d).
 
 ---
 
@@ -280,21 +288,21 @@ flowchart TD
 ---
 
 ### Phase 5: Retrieval-Augmented Generation & Chat Agent
-- [ ] **5.1 Query Router**
-  - [ ] Classify user query intent into:
+- [x] **5.1 Query Router (Backend)**
+  - [x] Classify user query intent into:
     - `STRUCTURED`: Pure metric lookup or ratio computation -> routes to SQL query generator.
     - `NARRATIVE`: Qualitative, strategic, or risk factor questions -> routes to pgvector hybrid search.
     - `HYBRID`: "Why did revenue drop despite margin expansion?" -> runs parallel structured + narrative retrieval.
-  - [ ] Detect single-company vs multi-company comparison queries.
-- [ ] **5.2 Hybrid Search & Cross-Encoder Reranking**
-  - [ ] Execute combined SQL query: `pgvector` Cosine Similarity + `tsvector` Keyword Full-Text Search.
-  - [ ] Retrieve top-K candidate chunks (top-K = 20).
-  - [ ] Rerank candidates using local `BAAI/bge-reranker-base` cross-encoder down to top-N (top-N = 5).
-- [ ] **5.3 RAG Synthesis Prompt & Citation Injection**
-  - [ ] Construct prompt with retrieved chunks formatted as `[Chunk {id}: Doc {doc}, Page {page}, Section {section}]`. (inferred — not in PROJECT.md, needs confirmation)
-  - [ ] Enforce structured LLM output schema with answer text and `citations: [{chunk_id, page_number}]` array.
-  - [ ] Deliver buffered (non-streaming) LLM response with citations payload to frontend chat interface for v1.
-- [ ] **5.4 Interactive Citation UI**
+  - [x] Detect single-company vs multi-company comparison queries.
+- [x] **5.2 Hybrid Search & Cross-Encoder Reranking (Backend)**
+  - [x] Execute combined SQL query: `pgvector` Cosine Similarity + `tsvector` Keyword Full-Text Search.
+  - [x] Retrieve top-K candidate chunks (top-K = 20).
+  - [x] Rerank candidates using local `BAAI/bge-reranker-base` cross-encoder down to top-N (top-N = 5).
+- [x] **5.3 RAG Synthesis Prompt & Citation Injection (Backend)**
+  - [x] Construct prompt with retrieved chunks formatted as `[Chunk {id}: Doc {doc}, Page {page}, Section {section}]`. (inferred — not in PROJECT.md, needs confirmation)
+  - [x] Enforce structured LLM output schema with answer text and `citations: [{chunk_id, page_number}]` array.
+  - [x] Deliver buffered (non-streaming) LLM response with citations payload to frontend chat interface for v1.
+- [ ] **5.4 Interactive Citation UI (Frontend)**
   - [ ] Render clickable citation pills in chat messages.
   - [ ] Opening a citation displays the exact text excerpt, section breadcrumbs, and a link/preview of the PDF page.
 
@@ -309,7 +317,8 @@ flowchart TD
   - [ ] Test metric extraction accuracy against ground-truth SEC 10-K tables.
   - [ ] Test retrieval precision/recall and router classification accuracy. (inferred — not in PROJECT.md, needs confirmation)
 - [ ] **6.3 Integration & End-to-End Testing**
-  - [ ] End-to-end test: Upload PDF -> Ingestion -> Dashboard Display -> Conversational Query with Citation.
+  - [x] Backend API route integration and idempotency test suite (`test_api_routes.py` with 15 passing tests).
+  - [ ] Full end-to-end test: Upload PDF -> Ingestion -> Dashboard Display -> Conversational Query with Citation (requires frontend).
 
 ---
 

@@ -7,6 +7,7 @@ must return structured citation pills linking directly to the source page number
 and excerpt so analysts can verify claims against official SEC filings.
 """
 
+from langfuse import observe
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,6 +47,7 @@ RULES:
 """
 
     @classmethod
+    @observe(name="rag_chat_query")
     async def process_chat_query(
         cls,
         session: AsyncSession,

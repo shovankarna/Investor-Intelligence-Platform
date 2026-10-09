@@ -4,7 +4,7 @@
 > meant to be read by both humans and AI coding agents to understand what the
 > system does and why specific choices were made.
 
-Last updated: 2026-09-21
+Last updated: 2026-10-08
 
 ---
 
@@ -28,8 +28,9 @@ number is not a usable financial number.
 
 **Goals (v1)**
 
-- User uploads a 10-K (or similar annual/financial report) PDF for a company.
-- System extracts core financial metrics and stores them in a queryable form.
+- User uploads a text-based financial report PDF (`10-K`, `10-Q`, `20-F`) for a company.
+- System validates PDF text layer (>= 200 chars) and classifies SEC form type prior to ingestion.
+- System extracts core financial metrics via a single batched LLM call across primary statements with deterministic verification (verbatim grounding check, Python accounting equations, and post-verification unit scaling).
 - Dashboard shows metrics with charts/tables and filters (company, year, metric).
 - Chat agent answers questions about one company or compares several,
   grounded in the uploaded documents, with citations (file + page + section).
@@ -43,8 +44,7 @@ number is not a usable financial number.
 - No automatic fetching of filings from the internet (SEC EDGAR, etc.) — the
   user supplies the document. (Worth revisiting later as a convenience
   feature, not part of the core loop.)
-- No support for non-PDF input formats initially (scanned images, HTML
-  filings) — revisit once the PDF path is solid.
+- No support for non-PDF or scanned image-only input formats (scanned image PDFs without text layer are rejected with HTTP 422).
 - No multi-user auth/permissions system — single-user or trusted-group use
   assumed for v1.
 
@@ -52,20 +52,25 @@ number is not a usable financial number.
 
 1. User uploads a financial report PDF and (for v1) manually tags it with
    company name + fiscal year at upload time.
-2. Backend (FastAPI) parses the PDF into typed elements (headings,
+2. Pre-ingestion validator (`validate_upload`) checks text layer density (>= 200 chars)
+   and verifies supported form type (`10-K`, `10-Q`, `20-F`), extracting fiscal year end date.
+   Non-text or unsupported forms return HTTP 422 immediately.
+3. Backend (FastAPI) parses the PDF via Docling into typed elements (headings,
    paragraphs, tables) with page numbers and section paths preserved.
-3. Tables are routed to metric extraction; narrative text is chunked and
-   embedded.
-4. Extracted metrics land in Postgres (structured); chunks + embeddings land
-   in the same Postgres instance via `pgvector` (semantic), each carrying
+4. Tables are filtered to primary financial statements (Operations, Balance Sheet, Cash Flows),
+   extracted in ONE batched LLM call with unscaled printed values, verified verbatim,
+   validated against accounting equations (`A = L + E`, `GP = Rev - COGS`), and unit-scaled in Python.
+   Narrative text is chunked and embedded via `bge-small-en-v1.5`.
+5. Extracted metrics land in Postgres (structured, with `verified` and `low_confidence` flags);
+   chunks + embeddings land in the same Postgres instance via `pgvector` (semantic), each carrying
    company/year/page/section metadata.
-5. Dashboard (Next.js frontend, calling the FastAPI backend) reads metrics —
+6. Dashboard (Next.js frontend, calling the FastAPI backend) reads metrics —
    charts, tables, filters by company/year/metric.
-6. User opens the chat agent, asks a question (single-company or
+7. User opens the chat agent, asks a question (single-company or
    cross-company). A router decides whether the question needs structured
    data, narrative retrieval, or both, retrieves accordingly, and the LLM
    (OpenRouter) answers with inline citations back to `{file, page, section}`.
-7. User can click a citation to see the source excerpt (and ideally jump to
+8. User can click a citation to see the source excerpt (and ideally jump to
    that page of the original PDF).
 
 ## 4. High-level architecture
@@ -112,7 +117,7 @@ Update this table as tools/models change — that's the point of it.
 | Reranker | Cross-encoder reranking | `BAAI/bge-reranker-base` (local) | Cohere Rerank (paid) | Decided | Reranks top-N hybrid results before they reach the LLM. Runs in the same backend process as the embedding model — Cloud Run's free-tier GiB-seconds comfortably cover both for a personal/demo project |
 | Structured + vector storage host | Managed Postgres | Supabase (free tier) | Neon | Decided | Supabase bundles Postgres + `pgvector` + object storage in one free vendor — the object storage is useful later for storing the original uploaded PDFs for citation linking |
 | LLM (reasoning/chat) | Generation model | OpenRouter free-tier models only, with a fallback chain across 2-3 `:free` models | Local Ollama fallback (rejected — see ADR-5) | Decided | See §5.2 for rate limits and model picks |
-| Metric extraction | Structured output from LLM | LLM + JSON schema per metric | — | Decided | Extract with citation: persist `source_chunk_id`/`page_number` alongside every extracted value |
+| Metric extraction | Structured output from LLM with deterministic verification | LLM + JSON schema (13 metrics) + Python verification | — | Decided | Primary statement filtering; ONE batched call with unscaled printed values; verbatim grounding check; Python accounting check retry; Python post-verification unit scaling |
 | Frontend | Dashboard + chat UI | Next.js (React) | Plain React (Vite/CRA), Streamlit | Decided | Next.js chosen over plain React for free Vercel deployment ergonomics |
 | Frontend hosting | Public deployment | Vercel (free tier) | Netlify, Cloudflare Pages | Proposed | Deploys directly from the GitHub repo, no cost at this scale |
 | Backend hosting | Public deployment | Google Cloud Run (free tier) | Render (free tier, sleeps on inactivity), Fly.io | Decided | Free tier: 180,000 vCPU-seconds + 360,000 GiB-seconds + 2M requests/month, billed only while actively handling a request. Scales to zero when idle — comfortably covers local embedding + reranker models for a personal/demo project |
@@ -170,12 +175,26 @@ metadata and metric data joinable in one database, and avoids syncing two
 systems. Hybrid search is done via Postgres full-text search combined with
 `pgvector` cosine similarity in a single query.
 
+**ADR-7 — Pre-ingestion validation restricts v1 scope to text-based SEC filings.**
+Uploaded documents are validated prior to ingestion (`validate_upload`):
+- Scanned or image-only PDFs (< 200 chars across first 3 pages) are rejected immediately with HTTP 422.
+- Form type must match supported forms (`10-K`, `10-Q`, `20-F`); unsupported forms (e.g. `40-F` or unknown) are rejected with HTTP 422.
+- `form_type` determines the accounting standard alias map (US GAAP for `10-K`/`10-Q`, IFRS for `20-F`).
+
+**ADR-8 — LLM-first metric extraction with deterministic verification.**
+Instead of trusting free-form LLM arithmetic or running per-table loops:
+1. Tables are filtered to primary financial statements (Operations, Balance Sheet, Cash Flows); all footnote/non-primary tables are pruned.
+2. All primary statements are sent in ONE batched call to OpenRouter with unscaled printed values.
+3. Every returned figure must appear verbatim in the source table text for its page (grounding check); ungrounded figures are marked `verified=False` and `low_confidence=True`.
+4. Python enforces accounting equations (`Assets == Liabilities + Equity`, `Gross Profit == Revenue - COGS`). On failure, the failing statement is retried once. Persistent mismatches are stored with `low_confidence=True` rather than dropped silently.
+5. Unit scaling (thousands/millions to base units) is applied in Python after verification, never by the LLM.
+
 ## 7. Data model (Postgres, high level)
 
 | Table | Key columns | Notes |
 |---|---|---|
-| `documents` | `id`, `company`, `fiscal_year`, `filename`, `upload_date`, `content_hash` | `content_hash` used for idempotent re-ingestion (upsert, not append) |
-| `financial_metrics` | `id`, `document_id` (FK), `metric_name`, `value` (`NUMERIC`), `unit`, `currency`, `source_page`, `source_chunk_id` | One row per metric per document; unique on `(document_id, metric_name)`. Ratios are **not** stored here — see ADR-4 |
+| `documents` | `id`, `company`, `fiscal_year`, `form_type`, `fiscal_year_end`, `filename`, `upload_date`, `content_hash` | `content_hash` used for idempotent re-ingestion (upsert, not append); `form_type` sets US GAAP vs IFRS |
+| `financial_metrics` | `id`, `document_id` (FK), `metric_name`, `value` (`NUMERIC`), `unit`, `currency`, `source_page`, `source_chunk_id`, `verified` (`BOOLEAN`), `low_confidence` (`BOOLEAN`) | One row per metric per document; unique on `(document_id, metric_name)`. Verified via verbatim grounding and accounting checks |
 | `chunks` | `id`, `document_id` (FK), `page_number`, `section_path`, `element_type` (table/prose), `content`, `embedding` (`vector` via pgvector) | Content and embedding live in the same row/table now that storage is consolidated (ADR-6) |
 | `chat_logs` *(recommended)* | `id`, `question`, `answer`, `retrieved_chunk_ids`, `created_at` | For debugging retrieval quality after the fact |
 
@@ -184,13 +203,15 @@ systems. Hybrid search is done via Postgres full-text search combined with
 ```sql
 CREATE TABLE financial_metrics (
     id              SERIAL PRIMARY KEY,
-    document_id     INTEGER REFERENCES documents(id),
+    document_id     INTEGER REFERENCES documents(id) ON DELETE CASCADE,
     metric_name     TEXT NOT NULL,       -- 'total_revenue', 'net_income', ...
     value           NUMERIC NOT NULL,
-    unit            TEXT NOT NULL,       -- 'USD_millions', 'USD_thousands'
+    unit            TEXT NOT NULL,       -- 'USD_units', 'USD_millions'
     currency        TEXT NOT NULL DEFAULT 'USD',
     source_page     INTEGER NOT NULL,
     source_chunk_id TEXT,
+    verified        BOOLEAN NOT NULL DEFAULT TRUE,
+    low_confidence  BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (document_id, metric_name)
 );
 ```
@@ -250,12 +271,12 @@ exist for a company.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | PDF upload, Docling parsing, table/prose fork | Not started |
-| 2 | Chunk + embed narrative text into pgvector | Not started |
-| 3 | Extract metrics into Postgres with citations | Not started |
-| 4 | Dashboard (Next.js): charts, tables, filters | Not started |
-| 5 | Chat agent: router + hybrid retrieval + citations | Not started |
-| 6 | Groundedness check + eval set | Not started |
+| 1 | PDF upload, validation (10-K/10-Q/20-F), Docling parsing, table/prose fork | Completed |
+| 2 | Chunk + embed narrative text into pgvector | Completed |
+| 3 | Extract metrics with verbatim grounding & accounting verification | Completed |
+| 4 | Dashboard (Next.js): charts, tables, filters | In progress |
+| 5 | Chat agent: router + hybrid retrieval + citations | Backend completed |
+| 6 | Groundedness check + eval set | In progress |
 | 7 (later) | Auto-fetch from SEC EDGAR as a convenience option | Backlog |
 | 8 (later) | Non-PDF input formats (scanned, HTML) | Backlog |
 

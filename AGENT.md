@@ -39,6 +39,8 @@ violating them produces a system that's wrong, not just inelegant.
 | 5 | LLM calls go through OpenRouter only. No local Ollama or other local-LLM code path, even as a "temporary" fallback. | Dev and prod must hit the identical provider — see PROJECT.md ADR-5. |
 | 6 | Money values are `NUMERIC`/`Decimal` end to end — database column, Python variable, API response. Never `float`. | Floating-point rounding has no place in financial data. |
 | 7 | No paid service is added without it being written into PROJECT.md's tech-stack table first, status "Decided." | The whole point of this project is that it runs free. |
+| 8 | Pre-ingestion validation runs before any heavy parsing. PDFs with < 200 chars or forms other than `10-K`, `10-Q`, `20-F` must be rejected with HTTP 422. | Restricts v1 scope to text-based SEC filings; prevents OCR hallucinations. |
+| 9 | Metric extraction must be LLM-first with deterministic verification: filter to primary statements, batch into ONE call with unscaled printed values, check verbatim grounding, enforce Python accounting checks with single retry, and scale units in Python. | Prevents LLM arithmetic hallucinations, multi-call rate limits, and silent data corruption. |
 
 If a task seems to require breaking one of these, stop and flag it (§7)
 instead of finding a workaround that technically complies.
@@ -108,8 +110,9 @@ Don't invent a different top-level layout without updating this section.
 **Do**
 - One router per resource (`documents.py`, `metrics.py`, `chat.py`), all
   mounted in a central `main.py`.
-- Validate uploaded files: PDF only, size limit enforced, before anything
-  else touches the file.
+- Validate uploaded files: PDF only, size limit enforced. Run `validate_upload(path)`
+  to verify text density (>= 200 chars) and form type (`10-K`, `10-Q`, `20-F`) before
+  initiating ingestion. Return HTTP 422 on failure.
 - Return structured error responses (consistent shape: `{detail, code}`),
   not raw stack traces, to the frontend.
 - Load the embedding/reranker models once at startup (module-level
@@ -154,6 +157,10 @@ Don't invent a different top-level layout without updating this section.
 - Keep the table/prose fork at the element level (per Docling's typed
   output) — never re-flatten a parsed document to one string before
   deciding what's a table and what's prose.
+- Filter candidate tables for metric extraction down to primary statements
+  (Operations/Income, Balance Sheet, Cash Flows) using `section_path` and headings;
+  prune footnote and non-primary tables.
+- Send all selected primary statements in ONE batched LLM call with unscaled printed values.
 - Serialize tables to Markdown when they have a single header row, HTML
   when they have merged/multi-row headers (`rowspan`/`colspan`). Never
   split a table across chunks mid-row.
@@ -206,6 +213,12 @@ architectural choices are not fine to pick alone.
   "ask the model to output JSON and hope," use the API's structured-output
   feature if the chosen model supports it, and validate the response
   against the schema before it touches the database.
+- Require LLM to return printed numbers unscaled; apply unit scaling in Python.
+- Every extracted figure must undergo a verbatim grounding check against the source
+  table text for its cited page (`verified=True`/`False`).
+- Enforce Python Decimal accounting checks on extracted statements (`assets == liabilities + equity`,
+  `gross_profit == revenue - COGS`). On failure, retry once with only the failing statement.
+  If failure persists, store with `verified=False` and `low_confidence=True` (never drop silently).
 - Every metric extraction and every chat answer must be able to trace back
   to which chunk(s)/page(s) it came from — build this into the prompt and
   the response schema from the start, not bolted on later.
@@ -233,6 +246,12 @@ architectural choices are not fine to pick alone.
 - Every ratio calculation (`Gross Margin`, `ROE`, etc.) gets a unit test
   with known inputs/outputs — this is pure arithmetic, it should never
   regress silently.
+- Pre-ingestion upload validator gets tests covering text density (< 200 chars),
+  unsupported form types, and valid `10-K`, `10-Q`, `20-F` filings.
+- Every metric extraction path gets unit tests mocking the LLM: assert exactly
+  one call per document on the happy path, assert hallucinated values are rejected
+  by the grounding check, assert balance-sheet mismatches trigger one retry, and
+  assert Python unit scaling is applied correctly.
 - Every API route gets at least one happy-path test and one
   invalid-input test.
 - Ingestion idempotency gets an explicit test: ingest the same file twice,
@@ -266,4 +285,8 @@ architectural choices are not fine to pick alone.
 | Keep tables whole per chunk | Split a table mid-row when chunking |
 | Add new env vars to `.env.example` | Commit a real credential or `.env` file |
 | Write a new migration for schema changes | Hand-edit the Supabase schema outside version control |
+| Validate text density & form type before ingestion | Send image-only PDFs or unsupported forms to Docling |
+| Batch primary statements into 1 call with unscaled values | Call LLM per table or ask LLM to scale numbers |
+| Verify numbers verbatim against source table text | Trust LLM extracted numbers without grounding check |
+| Check accounting equations with single retry | Drop failing metrics silently |
 | Ask/flag when a hard constraint (§1) is in tension with a task | Find a technically-compliant workaround that defeats the constraint's purpose |

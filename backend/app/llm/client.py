@@ -5,6 +5,7 @@ import json
 from typing import Any, TypeVar
 
 import httpx
+from langfuse import observe
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -35,6 +36,7 @@ class OpenRouterClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    @observe(as_type="generation")
     async def generate(
         self,
         messages: list[dict[str, str]],

@@ -1,6 +1,7 @@
-"""Application settings and constants configuration."""
+import json
+from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,7 +9,7 @@ class Settings(BaseSettings):
     """Central application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -17,10 +18,24 @@ class Settings(BaseSettings):
     APP_NAME: str = "Investor Intelligence Platform"
     APP_ENV: str = Field(default="development", description="Runtime environment")
     PORT: int = Field(default=8000, description="Backend server port")
-    ALLOWED_ORIGINS: list[str] = Field(
+    ALLOWED_ORIGINS: list[str] | str = Field(
         default=["http://localhost:3000"],
         description="Allowed CORS origin domains",
     )
+
+    @field_validator("ALLOWED_ORIGINS", mode="after")
+    @classmethod
+    def parse_allowed_origins(cls, v: list[str] | str) -> list[str]:
+        """Support JSON string, comma-separated string, or Python list for CORS origins."""
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    pass
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
 
     # OpenRouter API & Resiliency
     OPENROUTER_API_KEY: str = Field(
@@ -34,6 +49,15 @@ class Settings(BaseSettings):
         "nex-agi/nex-n2-pro:free",
         "openrouter/free",
     ]
+
+    # Langfuse LLM Observability & Monitoring (Free Tier)
+    LANGFUSE_PUBLIC_KEY: str = Field(default="", description="Langfuse public API key")
+    LANGFUSE_SECRET_KEY: str = Field(default="", description="Langfuse secret API key")
+    LANGFUSE_HOST: str = Field(
+        default="https://us.cloud.langfuse.com",
+        description="Langfuse host URL (e.g. https://cloud.langfuse.com or https://us.cloud.langfuse.com)",
+    )
+    LANGFUSE_BASE_URL: str | None = Field(default=None, description="Alias for LANGFUSE_HOST")
 
     # Database Configuration (Postgres + pgvector)
     DATABASE_URL: str = Field(
@@ -65,3 +89,15 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Propagate Langfuse credentials to os.environ so @observe auto-initializes
+import os
+
+if settings.LANGFUSE_PUBLIC_KEY:
+    os.environ["LANGFUSE_PUBLIC_KEY"] = settings.LANGFUSE_PUBLIC_KEY
+if settings.LANGFUSE_SECRET_KEY:
+    os.environ["LANGFUSE_SECRET_KEY"] = settings.LANGFUSE_SECRET_KEY
+_lf_host = settings.LANGFUSE_BASE_URL or settings.LANGFUSE_HOST
+if _lf_host:
+    os.environ["LANGFUSE_HOST"] = _lf_host
+    os.environ["LANGFUSE_BASE_URL"] = _lf_host
