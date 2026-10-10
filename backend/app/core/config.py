@@ -43,11 +43,11 @@ class Settings(BaseSettings):
         description="OpenRouter API key for LLM inference",
     )
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
-    OPENROUTER_DEFAULT_MODEL: str = "deepseek/deepseek-v4-flash:free"
+    OPENROUTER_DEFAULT_MODEL: str = "google/gemma-4-26b-a4b-it:free"
     OPENROUTER_FALLBACK_MODELS: list[str] = [
-        "moonshotai/kimi-k2.6:free",
-        "nex-agi/nex-n2-pro:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/free",
+        "google/gemma-4-31b-it:free",
     ]
 
     # Langfuse LLM Observability & Monitoring (Free Tier)
@@ -69,13 +69,51 @@ class Settings(BaseSettings):
         description="Sync database connection string for migrations",
     )
 
-    # Supabase Cloud & Storage
+    @field_validator("DATABASE_URL", mode="after")
+    @classmethod
+    def normalize_async_db_url(cls, v: str) -> str:
+        """Ensure async database URL uses postgresql+asyncpg:// driver."""
+        if v.startswith("postgres://"):
+            return "postgresql+asyncpg://" + v[len("postgres://") :]
+        if v.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + v[len("postgresql://") :]
+        return v
+
+    @field_validator("DATABASE_URL_SYNC", mode="after")
+    @classmethod
+    def normalize_sync_db_url(cls, v: str) -> str:
+        """Ensure sync database URL uses postgresql:// driver for migrations."""
+        if v.startswith("postgresql+asyncpg://"):
+            return "postgresql://" + v[len("postgresql+asyncpg://") :]
+        if v.startswith("postgres://"):
+            return "postgresql://" + v[len("postgres://") :]
+        return v
+
+    # Supabase Cloud & Storage (Supports Modern Publishable/Secret Keys & Legacy Keys)
     SUPABASE_URL: str = Field(default="", description="Supabase project URL")
-    SUPABASE_ANON_KEY: str = Field(default="", description="Supabase anon public key")
+    SUPABASE_PUBLISHABLE_KEY: str = Field(
+        default="", description="Modern Supabase Publishable Key (replaces anon key)"
+    )
+    SUPABASE_SECRET_KEY: str = Field(
+        default="", description="Modern Supabase Secret Key (replaces service_role key)"
+    )
+    SUPABASE_ANON_KEY: str = Field(
+        default="", description="Legacy Supabase anon public key"
+    )
     SUPABASE_SERVICE_ROLE_KEY: str = Field(
-        default="", description="Supabase service role private key"
+        default="", description="Legacy Supabase service role private key"
     )
     SUPABASE_BUCKET_NAME: str = "filings"
+
+    @property
+    def effective_supabase_publishable_key(self) -> str:
+        """Returns modern publishable key or fallback to legacy anon key."""
+        return self.SUPABASE_PUBLISHABLE_KEY or self.SUPABASE_ANON_KEY
+
+    @property
+    def effective_supabase_secret_key(self) -> str:
+        """Returns modern secret key or fallback to legacy service role key."""
+        return self.SUPABASE_SECRET_KEY or self.SUPABASE_SERVICE_ROLE_KEY
 
     # ML & RAG In-Process Model Defaults (PROJECT.md §12)
     EMBEDDING_MODEL_NAME: str = "BAAI/bge-small-en-v1.5"

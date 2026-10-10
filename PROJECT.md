@@ -115,8 +115,9 @@ Update this table as tools/models change — that's the point of it.
 | Embeddings | Text embedding model | `BAAI/bge-small-en-v1.5` (local, via `sentence-transformers`) | `bge-base-en-v1.5`, OpenRouter/hosted embeddings | Decided | Small variant chosen to fit comfortably in free-tier hosting RAM; runs identically in dev and prod (it's a library, not an API) |
 | Vector store | Semantic chunk storage + hybrid search | `pgvector` extension, same Postgres instance as metrics | Qdrant (separate service), Chroma, Weaviate | Decided | One database instead of two; hybrid search = pgvector cosine + Postgres full-text (`tsvector`/`ts_rank`) combined in SQL |
 | Reranker | Cross-encoder reranking | `BAAI/bge-reranker-base` (local) | Cohere Rerank (paid) | Decided | Reranks top-N hybrid results before they reach the LLM. Runs in the same backend process as the embedding model — Cloud Run's free-tier GiB-seconds comfortably cover both for a personal/demo project |
-| Structured + vector storage host | Managed Postgres | Supabase (free tier) | Neon | Decided | Supabase bundles Postgres + `pgvector` + object storage in one free vendor — the object storage is useful later for storing the original uploaded PDFs for citation linking |
+| Structured + vector storage host | Managed Postgres | Supabase (free tier) | Neon | Decided | Supabase bundles Postgres + `pgvector` + object storage (filings bucket). Uses Supavisor pooler (port 6543) for IPv4/async, and supports modern publishable/secret keys |
 | LLM (reasoning/chat) | Generation model | OpenRouter free-tier models only, with a fallback chain across 2-3 `:free` models | Local Ollama fallback (rejected — see ADR-5) | Decided | See §5.2 for rate limits and model picks |
+| Observability & Tracing | LLM & RAG Telemetry | Langfuse (Cloud Free Tier) | Phoenix, Helicone, Logfire | Decided | Free tier (50k traces/mo); tracks token usage (prompt/completion/total), latencies, model fallback events, and full RAG traces via `@observe` |
 | Metric extraction | Structured output from LLM with deterministic verification | LLM + JSON schema (13 metrics) + Python verification | — | Decided | Primary statement filtering; ONE batched call with unscaled printed values; verbatim grounding check; Python accounting check retry; Python post-verification unit scaling |
 | Frontend | Dashboard + chat UI | Next.js (React) | Plain React (Vite/CRA), Streamlit | Decided | Next.js chosen over plain React for free Vercel deployment ergonomics |
 | Frontend hosting | Public deployment | Vercel (free tier) | Netlify, Cloudflare Pages | Proposed | Deploys directly from the GitHub repo, no cost at this scale |
@@ -128,8 +129,9 @@ Update this table as tools/models change — that's the point of it.
 |---|---|
 | Free tier shape | OpenRouter `:free` models: 20 requests/minute globally. Daily cap is 50/day if the account has never added credits, or 1,000/day once at least $10 has ever been added — that $10 isn't spent on free models, it just raises the ceiling |
 | Recommended one-time action | Add $10 to the OpenRouter account once, to unlock the 1,000/day cap. Not an ongoing cost |
-| Default model | `deepseek/deepseek-v4-flash:free` — 1M context, strong reasoning and structured-output handling |
-| Fallback chain | 1. `moonshotai/kimi-k2.6:free`  2. `nex-agi/nex-n2-pro:free` (explicit structured-output + function-calling support)  3. `openrouter/free` (OpenRouter's own auto-router — picks any currently-working free model matching required features; the safety net if all three named models are down) |
+| Default model | `nvidia/nemotron-3.5-lightning:free` — Fast inference, strong structured-output handling |
+| Fallback chain | 1. `google/gemma-4-31b-it:free`  2. `nvidia/nemotron-3-super-120b-a12b:free`  3. `openrouter/free` (OpenRouter's own auto-router — picks any currently-working free model matching required features; the safety net if all three named models are down) |
+| Observability | All OpenRouter completions and fallback failovers are automatically captured in Langfuse with token usage, latency, and model provenance |
 | Fallback strategy | On a 429 or 5xx, retry against the next model in the chain with exponential backoff, rather than failing the request. **Re-verify all IDs against `openrouter.ai/models` right before building ingestion** — free model IDs rotate weekly and get retired without much notice |
 | Local fallback | None by design — see ADR-5. Local dev and hosted prod both hit OpenRouter only, so behavior is identical in both environments |
 

@@ -222,6 +222,8 @@ architectural choices are not fine to pick alone.
 - Every metric extraction and every chat answer must be able to trace back
   to which chunk(s)/page(s) it came from — build this into the prompt and
   the response schema from the start, not bolted on later.
+- All LLM generations and RAG chat executions are instrumented with Langfuse `@observe`
+  to automatically capture token usage, latencies, and model fallback events without manual logging.
 - Re-verify free model IDs against `openrouter.ai/models` before relying on
   a specific ID long-term — they rotate.
 

@@ -7,7 +7,9 @@ WHY DOCLING OVER STANDARD OCR / PYPDF:
 3. Provenance Extraction: Captures page numbers and bounding box locations for every extracted element.
 """
 
-from docling.document_converter import DocumentConverter
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
 
 from app.models.parser import ParsedDocumentResult, ParsedProse, ParsedTable
 
@@ -21,10 +23,18 @@ class ParserService:
     def get_converter(cls) -> DocumentConverter:
         """
         Initializes and caches the DocumentConverter singleton.
-        Docling 2.x performs layout-aware, table-preserving conversion by default.
+        Disables CPU-bound OCR since SEC filings are native digital text documents.
         """
         if cls._converter is None:
-            cls._converter = DocumentConverter()
+            pipeline_options = PdfPipelineOptions()
+            pipeline_options.do_ocr = False  # Skip slow CPU OCR on digital PDFs
+            pipeline_options.do_table_structure = True
+
+            cls._converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+                }
+            )
         return cls._converter
 
     @classmethod
@@ -67,8 +77,14 @@ class ParserService:
 
             # Check if element is a Table
             if hasattr(item, "export_to_markdown") and hasattr(item, "data"):
-                md_table = item.export_to_markdown()
-                html_table = item.export_to_html() if hasattr(item, "export_to_html") else None
+                try:
+                    md_table = item.export_to_markdown(doc=doc)
+                except TypeError:
+                    md_table = item.export_to_markdown()
+                try:
+                    html_table = item.export_to_html(doc=doc) if hasattr(item, "export_to_html") else None
+                except TypeError:
+                    html_table = item.export_to_html() if hasattr(item, "export_to_html") else None
 
                 num_rows = len(item.data.grid) if hasattr(item.data, "grid") else 0
                 num_cols = (

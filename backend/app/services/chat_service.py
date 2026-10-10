@@ -62,9 +62,13 @@ RULES:
         5. Logs the query/answer to chat_logs.
         """
         # Step 1: Route the query
+        print(f"\n{'=' * 80}", flush=True)
+        print(f"💬 [RAG QUERY] Incoming question: \"{request.question}\"", flush=True)
         plan: QueryPlan = await QueryRouter.route_query(request.question)
         target_company = request.company or (plan.companies[0] if plan.companies else None)
         target_year = request.fiscal_year or plan.fiscal_year
+
+        print(f"   🧭 [Intent Router] Type: [{plan.query_type.value.upper()}] | Company: {target_company or 'Any'} | Fiscal Year: {target_year or 'Any'}", flush=True)
 
         context_blocks: list[str] = []
         retrieved_chunk_ids: list[str] = []
@@ -91,6 +95,9 @@ RULES:
                     "### Structured Financial Line Items (from verified database):\n"
                     + "\n".join(metric_lines)
                 )
+                print(f"   📊 [Path A: Structured SQL] Retrieved {len(metrics)} verified financial metrics from PostgreSQL.", flush=True)
+            else:
+                print("   📊 [Path A: Structured SQL] No matching financial metrics found in database.", flush=True)
 
         # Step 3: Path B (Narrative Chunks via Hybrid Search + Cross-Encoder)
         if plan.query_type in [QueryType.NARRATIVE, QueryType.HYBRID]:
@@ -110,7 +117,7 @@ RULES:
 
             if reranked:
                 narrative_lines = []
-                for chunk, _score in reranked:
+                for chunk, score in reranked:
                     retrieved_chunk_ids.append(chunk.id)
                     narrative_lines.append(
                         f"[Chunk {chunk.id} | Page {chunk.page_number} | Section: {chunk.section_path}]:\n{chunk.content}\n"
@@ -118,6 +125,9 @@ RULES:
                 context_blocks.append(
                     "### Qualitative & Narrative Filing Excerpts:\n" + "\n".join(narrative_lines)
                 )
+                print(f"   📚 [Path B: Vector Retrieval] Retrieved & Reranked top {len(reranked)} narrative chunks.", flush=True)
+                for chunk, score in reranked[:2]:
+                    print(f"      • [Score {score:.3f}] Page {chunk.page_number}: {chunk.section_path[:50]}...", flush=True)
 
         # Step 4: Construct LLM Prompt
         combined_context = (
@@ -139,12 +149,17 @@ Provide a comprehensive, accurate response with structured citations.
             {"role": "user", "content": user_prompt},
         ]
 
+        print(f"   🤖 [LLM Synthesis] Generating citation-backed answer...", flush=True)
+
         # Step 5: Generate answer via OpenRouter structured client
         chat_response: ChatResponse = await llm_client.generate_structured(
             messages=messages,
             schema=ChatResponse,
             temperature=0.1,
         )
+
+        print(f"   ✨ [Synthesis Complete] Answer generated with {len(chat_response.citations)} citation pills.", flush=True)
+        print(f"{'=' * 80}\n", flush=True)
 
         # Step 6: Log audit trail to chat_logs table (PROJECT.md §7)
         log_entry = ChatLog(

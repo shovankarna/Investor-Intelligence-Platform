@@ -6,9 +6,10 @@ Standardizing the 13 core line items across all companies (Apple, Microsoft, Tes
 allows universal ratio calculations and side-by-side comparative dashboards.
 """
 
+from typing import Any
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class RawMetricItem(BaseModel):
@@ -18,6 +19,25 @@ class RawMetricItem(BaseModel):
 
     metric_name: str = Field(..., description="Standard snake_case key (e.g., 'total_revenue')")
     value: Decimal = Field(..., description="Raw metric value in Decimal (never float)")
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def sanitize_decimal_value(cls, v: Any) -> Decimal:
+        """Parses and sanitizes strings with commas, dollar signs, and parentheses into Decimal."""
+        if isinstance(v, Decimal):
+            return v
+        if isinstance(v, (int, float)):
+            return Decimal(str(v))
+        if isinstance(v, str):
+            clean = v.strip().replace("$", "").replace(",", "").replace(" ", "")
+            # Support negative accounting notation: (1234) -> -1234
+            if clean.startswith("(") and clean.endswith(")"):
+                clean = f"-{clean[1:-1]}"
+            try:
+                return Decimal(clean)
+            except Exception as e:
+                raise ValueError(f"Cannot parse financial value '{v}' into Decimal: {e}")
+        return Decimal(str(v))
     unit: str = Field(
         default="USD_millions",
         description="Unit scale: 'USD_millions', 'USD_thousands', 'USD_units'",

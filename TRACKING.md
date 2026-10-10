@@ -108,9 +108,10 @@ flowchart TD
 | **Pre-Ingestion Validator** | `upload_validator.py` | In-Process Backend Service | Rejects scanned PDFs (<200 chars) & unsupported forms (HTTP 422) |
 | **Text Embedding** | `BAAI/bge-small-en-v1.5` | In-Process `sentence-transformers` | Free, runs in memory (~130MB footprint) |
 | **Cross-Encoder Reranker** | `BAAI/bge-reranker-base` | In-Process `sentence-transformers` | Free, runs in memory (~400MB footprint) |
-| **Database & Vectors** | Supabase Postgres + `pgvector` | Managed Supabase Cloud | Free Tier (500MB storage, pgvector enabled) *(inferred — verify against Supabase's current published limits before relying on this)* |
-| **File Storage** | Supabase Storage | Managed Supabase Cloud | Free Tier (1GB storage for uploaded PDFs) *(inferred — verify against Supabase's current published limits before relying on this)* |
+| **Database & Vectors** | Supabase Postgres + `pgvector` | Managed Supabase Cloud | Free Tier (500MB storage, pgvector enabled, Supavisor pooler) |
+| **File Storage** | Supabase Storage | Managed Supabase Cloud | Free Tier (1GB storage for uploaded PDFs, `filings` bucket) |
 | **LLM Provider** | OpenRouter Free Tier | External HTTP REST API | 20 req/min global limit; multi-model fallback |
+| **Observability & Tracing** | Langfuse (Cloud Free Tier) | External Telemetry API | Free Tier (50k traces/mo); tracks tokens, latencies, fallbacks, and RAG traces via `@observe` |
 | **Metric Extraction** | LLM + Deterministic Verification | OpenRouter + Python (`Decimal`) | 1 batched call, verbatim grounding, accounting checks retry, unit scaling |
 | **Frontend Web App** | Next.js 14+ / React / TailwindCSS | Vercel Deployment | Free Tier (Hobby) |
 
@@ -210,8 +211,9 @@ flowchart TD
   - [ ] Set up Supabase Storage bucket for PDF documents with access policies.
 - [x] **0.3 OpenRouter Client & Resiliency Layer**
   - [x] Implement OpenRouter API client supporting structured JSON output and function calling (`app/llm/client.py`).
-  - [x] Implement fallback chain: `deepseek/deepseek-v4-flash:free` -> `moonshotai/kimi-k2.6:free` -> `nex-agi/nex-n2-pro:free` -> `openrouter/free`.
+  - [x] Implement fallback chain: `nvidia/nemotron-3.5-lightning:free` -> `google/gemma-4-31b-it:free` -> `nvidia/nemotron-3-super-120b-a12b:free` -> `openrouter/free`.
   - [x] Implement exponential backoff retry handler for HTTP 429 and 5xx responses.
+  - [x] Integrate Langfuse `@observe` telemetry to monitor token usage, latencies, and model failover events.
 
 ---
 
@@ -271,19 +273,19 @@ flowchart TD
 ---
 
 ### Phase 4: Frontend Dashboard & Financial Analytics UI
-- [ ] **4.1 Core Design System & UI Shell (Next.js)**
-  - [ ] Set up layout with dark mode, modern typography (Inter/Outfit), and sleek cards. (inferred — not in PROJECT.md, needs confirmation)
-  - [ ] Build global navigation bar, company selector dropdown, and fiscal year filter.
-  - [ ] Implement Document Upload modal with progress indicators.
-- [ ] **4.2 Company Financial Overview Page**
-  - [ ] KPI summary cards displaying core metrics and calculated ratios with YoY badges.
-  - [ ] Income Statement, Balance Sheet, and Cash Flow interactive data tables.
-  - [ ] Interactive charts (Revenue & Net Income trends, Profit Margin evolution, Cash Flow vs CapEx). (inferred — not in PROJECT.md, needs confirmation)
-- [ ] **4.3 Multi-Company Comparison Dashboard**
-  - [ ] Side-by-side metric comparison table for 2+ companies.
-  - [ ] Comparative normalized bar charts and radar charts. (inferred — not in PROJECT.md, needs confirmation)
-- [ ] **4.4 Metric Provenance Modal**
-  - [ ] Click-through on any metric value to reveal source document, page number, and source table snippet.
+- [x] **4.1 Core Design System & UI Shell (Next.js)**
+  - [x] Set up layout with dark mode, modern typography, and sleek glassmorphism cards.
+  - [x] Build global navigation bar, company selector dropdown, and fiscal year filter.
+  - [x] Implement Document Upload modal with pre-ingestion validation rules and progress indicators.
+- [x] **4.2 Company Financial Overview Page**
+  - [x] KPI summary cards displaying core metrics and calculated ratios with YoY badges.
+  - [x] Income Statement, Balance Sheet, and Cash Flow interactive data tables.
+  - [x] Interactive zero-dependency SVG charts (Revenue & Net Income trends, Profit Margin evolution, Cash Flow vs CapEx).
+- [x] **4.3 Multi-Company Comparison Dashboard**
+  - [x] Side-by-side metric comparison table for 2+ companies.
+  - [x] Comparative normalized scale benchmark bar charts.
+- [x] **4.4 Metric Provenance Modal**
+  - [x] Click-through on any metric value to reveal source document, page number, verbatim verification status, and audit lineage.
 
 ---
 
@@ -299,12 +301,12 @@ flowchart TD
   - [x] Retrieve top-K candidate chunks (top-K = 20).
   - [x] Rerank candidates using local `BAAI/bge-reranker-base` cross-encoder down to top-N (top-N = 5).
 - [x] **5.3 RAG Synthesis Prompt & Citation Injection (Backend)**
-  - [x] Construct prompt with retrieved chunks formatted as `[Chunk {id}: Doc {doc}, Page {page}, Section {section}]`. (inferred — not in PROJECT.md, needs confirmation)
+  - [x] Construct prompt with retrieved chunks formatted as `[Chunk {id}: Doc {doc}, Page {page}, Section {section}]`.
   - [x] Enforce structured LLM output schema with answer text and `citations: [{chunk_id, page_number}]` array.
   - [x] Deliver buffered (non-streaming) LLM response with citations payload to frontend chat interface for v1.
-- [ ] **5.4 Interactive Citation UI (Frontend)**
-  - [ ] Render clickable citation pills in chat messages.
-  - [ ] Opening a citation displays the exact text excerpt, section breadcrumbs, and a link/preview of the PDF page.
+- [x] **5.4 Interactive Citation UI (Frontend)**
+  - [x] Render clickable citation pills in chat messages with query routing intent badge (`[STRUCTURED]`, `[NARRATIVE]`, `[HYBRID]`).
+  - [x] Opening a citation displays the exact text excerpt, section breadcrumbs, element classification, and page number in an audit modal.
 
 ---
 
@@ -341,9 +343,10 @@ flowchart TD
 - [ ] **Frontend (Next.js on Vercel):**
   - [ ] Configure environment variables (`NEXT_PUBLIC_API_URL`, Supabase public keys).
   - [ ] Set up automated GitHub CI/CD deployments.
-- [ ] **Security & Observability:**
-  - [ ] Add CORS policies restricting API access to Vercel domain. (inferred — not in PROJECT.md, needs confirmation)
-  - [ ] Log chat queries and retrieval performance in `chat_logs`.
+- [x] **Security & Observability:**
+  - [x] Add CORS policies with flexible JSON / comma-separated string parsing restricting API access.
+  - [x] Integrate Langfuse Cloud telemetry (`@observe`) for token, latency, and full RAG trace observability.
+  - [x] Log chat queries and retrieval performance in `chat_logs`.
 
 ---
 

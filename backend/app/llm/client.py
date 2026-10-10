@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from typing import Any, TypeVar
 
 import httpx
@@ -62,6 +63,8 @@ class OpenRouterClient:
                         if response_format:
                             payload["response_format"] = response_format
 
+                        print(f"      📡 [LLM Call] Invoking model '{model_id}' (temp={temperature}, max_tokens={max_tokens})...", flush=True)
+
                         response = await client.post(
                             f"{self.base_url}/chat/completions",
                             headers=self._get_headers(),
@@ -72,7 +75,7 @@ class OpenRouterClient:
                         if response.status_code == 429 or response.status_code >= 500:
                             wait_seconds = (2**attempt) + 0.5
                             print(
-                                f"⚠️ [OpenRouter] HTTP {response.status_code} on {model_id}. Retrying in {wait_seconds:.1f}s..."
+                                f"      ⚠️ [OpenRouter] HTTP {response.status_code} on {model_id}. Retrying in {wait_seconds:.1f}s...", flush=True
                             )
                             await asyncio.sleep(wait_seconds)
                             continue
@@ -85,15 +88,22 @@ class OpenRouterClient:
                         if not choices:
                             raise ValueError(f"No completion choices returned by model {model_id}")
 
-                        raw_content = choices[0].get("message", {}).get("content", "")
+                        raw_content = choices[0].get("message", {}).get("content") or ""
                         usage = data.get("usage", {})
+                        p_tok = usage.get("prompt_tokens", 0)
+                        c_tok = usage.get("completion_tokens", 0)
+                        t_tok = usage.get("total_tokens", 0)
+
+                        print(f"      ✨ [LLM Response] Success from '{model_id}' | Tokens: {p_tok} prompt + {c_tok} completion = {t_tok} total", flush=True)
+                        preview = raw_content[:150].replace('\n', ' ')
+                        print(f"      📝 [LLM Output Preview]: {preview}...", flush=True)
 
                         return LLMGenerationResult(
                             raw_text=raw_content,
                             model_used=model_id,
-                            prompt_tokens=usage.get("prompt_tokens", 0),
-                            completion_tokens=usage.get("completion_tokens", 0),
-                            total_tokens=usage.get("total_tokens", 0),
+                            prompt_tokens=p_tok,
+                            completion_tokens=c_tok,
+                            total_tokens=t_tok,
                         )
 
                     except (
@@ -104,12 +114,12 @@ class OpenRouterClient:
                         last_exception = exc
                         wait_seconds = (2**attempt) + 0.5
                         print(
-                            f"⚠️ [OpenRouter] Error on model '{model_id}' (attempt {attempt + 1}): {exc}"
+                            f"[WARN] [OpenRouter] Error on model '{model_id}' (attempt {attempt + 1}): {exc}"
                         )
                         await asyncio.sleep(wait_seconds)
 
                 print(
-                    f"❌ [OpenRouter] Exhausted retries for '{model_id}'. Failing over to next fallback model..."
+                    f"[ERROR] [OpenRouter] Exhausted retries for '{model_id}'. Failing over to next fallback model..."
                 )
 
         raise RuntimeError(f"All models in fallback chain failed. Last error: {last_exception}")
@@ -130,22 +140,51 @@ class OpenRouterClient:
             response_format={"type": "json_object"},
         )
 
-        try:
-            cleaned_text = result.raw_text.strip()
-            # Strip markdown code blocks if the model wrapped output in ```json ... ```
-            if cleaned_text.startswith("```json"):
-                cleaned_text = cleaned_text[7:]
-            elif cleaned_text.startswith("```"):
-                cleaned_text = cleaned_text[3:]
-            cleaned_text = cleaned_text.removesuffix("```")
+        raw_text = result.raw_text.strip()
 
-            parsed_dict = json.loads(cleaned_text.strip())
+        # 1. Try matching markdown code blocks: ```json ... ``` or ``` ... ```
+        code_block_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_text, re.IGNORECASE)
+        if code_block_match:
+            candidate = code_block_match.group(1).strip()
+            try:
+                parsed_dict = json.loads(candidate)
+                return schema.model_validate(parsed_dict)
+            except Exception:
+                pass
+
+        # 2. Try parsing raw text directly
+        try:
+            parsed_dict = json.loads(raw_text)
             return schema.model_validate(parsed_dict)
-        except Exception as exc:
-            raise ValueError(
-                f"Failed to parse structured JSON into schema {schema.__name__}. "
-                f"Raw output: {result.raw_text}"
-            ) from exc
+        except Exception:
+            pass
+
+        # 3. Find outermost JSON object { ... }
+        first_brace = raw_text.find("{")
+        last_brace = raw_text.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            candidate = raw_text[first_brace : last_brace + 1]
+            try:
+                parsed_dict = json.loads(candidate)
+                return schema.model_validate(parsed_dict)
+            except Exception:
+                pass
+
+        # 4. Find outermost JSON array [ ... ] if schema allows root list
+        first_bracket = raw_text.find("[")
+        last_bracket = raw_text.rfind("]")
+        if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+            candidate = raw_text[first_bracket : last_bracket + 1]
+            try:
+                parsed_dict = json.loads(candidate)
+                return schema.model_validate(parsed_dict)
+            except Exception:
+                pass
+
+        raise ValueError(
+            f"Failed to parse structured JSON into schema {schema.__name__}. "
+            f"Raw output: {result.raw_text}"
+        )
 
 
 # Module-level singleton instance

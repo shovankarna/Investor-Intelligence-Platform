@@ -79,17 +79,25 @@ class DocumentService:
                 detail="Uploaded PDF file is empty.",
             )
 
+        company_clean = metadata.company.strip()
+        form_type = metadata.form_type or "10-K"
+        print(f"\n{'=' * 80}", flush=True)
+        print(f"🚀 [INGESTION PIPELINE] Starting for '{file.filename}'", flush=True)
+        print(f"   🏢 Company: {company_clean} | 📅 Fiscal Year: {metadata.fiscal_year} | 📋 Form: {form_type}", flush=True)
+        print(f"   📦 PDF File Size: {len(file_bytes) / 1024:.1f} KB", flush=True)
+        print(f"{'=' * 80}", flush=True)
+
         # Step 3: Compute content hash for idempotency (ADR-4)
         content_hash = cls.calculate_sha256(file_bytes)
+        print(f"📍 [Stage 1/5] SHA-256 Hash Computed: {content_hash[:16]}...", flush=True)
 
         # Step 4: Idempotent check
         existing_doc = await cls.get_by_hash(session, content_hash)
         if existing_doc:
+            print(f"ℹ️ [Stage 1/5] Idempotency Match: Document already exists (ID: {existing_doc.id}). Skipping re-parsing.", flush=True)
             return existing_doc, True
 
         # Step 5: Save parent Document record
-        company_clean = metadata.company.strip()
-        form_type = metadata.form_type or "10-K"
         new_doc = Document(
             company=company_clean,
             fiscal_year=metadata.fiscal_year,
@@ -101,8 +109,10 @@ class DocumentService:
         )
         session.add(new_doc)
         await session.flush()  # Generates new_doc.id
+        print(f"📍 [Stage 2/5] Created Document Record in PostgreSQL (ID: {new_doc.id})", flush=True)
 
         # Step 6: Layout-aware parsing with Docling using a temporary file
+        print(f"📍 [Stage 3/5] Parsing PDF Layout with Docling (Fast Native Text + Table Extraction)...", flush=True)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
             tmp_file.write(file_bytes)
             tmp_path = tmp_file.name
@@ -118,13 +128,22 @@ class DocumentService:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+        print(f"   ✅ Docling Parse Finished: {parsed_result.total_pages} Pages | {len(parsed_result.tables)} Tables | {len(parsed_result.prose_blocks)} Prose Blocks", flush=True)
+
         # Step 7: Path A - Extract raw financial metrics from tables via OpenRouter
+        print(f"📍 [Stage 4/5] Extracting 13 Financial Metrics with LLM & Deterministic Verification...", flush=True)
+        extracted_metrics = []
         if parsed_result.tables:
-            extracted_metrics = await MetricExtractionService.extract_all_metrics(
-                parsed_result.tables,
-                form_type=new_doc.form_type,
-                fiscal_year=new_doc.fiscal_year,
-            )
+            try:
+                extracted_metrics = await MetricExtractionService.extract_all_metrics(
+                    parsed_result.tables,
+                    form_type=new_doc.form_type,
+                    fiscal_year=new_doc.fiscal_year,
+                )
+            except Exception as exc:
+                print(f"⚠️ [Stage 4/5] [WARN] Metric extraction failed gracefully: {exc}", flush=True)
+                extracted_metrics = []
+
             for m in extracted_metrics:
                 metric_row = FinancialMetric(
                     document_id=new_doc.id,
@@ -139,15 +158,24 @@ class DocumentService:
                 )
                 session.add(metric_row)
 
+            print(f"   ✅ Saved {len(extracted_metrics)} Extracted Metrics to PostgreSQL (verified & grounded).", flush=True)
+        else:
+            print(f"   ⚠️ No tables detected in PDF for metric extraction.", flush=True)
+
         # Step 8: Path B - Structure-aware chunking & local vector embedding
+        print(f"📍 [Stage 5/5] Generating Vector Chunks & Embeddings (BAAI/bge-small-en-v1.5)...", flush=True)
         chunks = DocumentChunker.chunk_document(parsed_result)
         if chunks:
             embedded_chunks = EmbeddingService.embed_chunks(chunks)
             for ch in embedded_chunks:
                 session.add(ch)
+            print(f"   ✅ Vectorized & Saved {len(embedded_chunks)} Chunks into PostgreSQL pgvector table.", flush=True)
 
         # Step 9: Commit full transaction
         await session.commit()
         await session.refresh(new_doc)
+
+        print(f"\n🎉 [INGESTION SUCCESS] Filing ID {new_doc.id} ('{new_doc.filename}') ready for Dashboard & RAG Assistant!", flush=True)
+        print(f"{'=' * 80}\n", flush=True)
 
         return new_doc, False

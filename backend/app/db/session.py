@@ -11,12 +11,13 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.config import settings
 
-# Create async engine for high-performance API routes
+# Create async engine for high-performance API routes (with PgBouncer/Supavisor pooler support)
 async_engine: AsyncEngine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     future=True,
     pool_pre_ping=True,
+    connect_args={"statement_cache_size": 0},
 )
 
 # Async session factory

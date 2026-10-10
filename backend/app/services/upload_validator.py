@@ -40,10 +40,10 @@ def validate_upload(path: str) -> UploadValidationResult:
     Raises:
         HTTPException(422) if the file lacks text layer or is an unsupported form type.
     """
-    # 1. Text layer check
+    # 1. Text layer check across the opening pages
     try:
         reader = pypdf.PdfReader(path)
-        pages_to_check = reader.pages[:3]
+        pages_to_check = reader.pages[:10]
         if not pages_to_check:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

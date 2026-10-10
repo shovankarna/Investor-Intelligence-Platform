@@ -70,10 +70,10 @@ class FinancialMathService:
             if ratio is not None:
                 net_margin = round(ratio * Decimal(100), 2)
 
-        # 4. Free Cash Flow = Operating Cash Flow - CapEx
+        # 4. Free Cash Flow = Operating Cash Flow - |CapEx|
         fcf = None
         if op_cf is not None and capex is not None:
-            fcf = op_cf - capex
+            fcf = op_cf - abs(capex)
 
         # 5. Debt-to-Equity = Total Liabilities / Stockholders' Equity
         debt_to_equity = None

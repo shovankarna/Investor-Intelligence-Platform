@@ -1,5 +1,12 @@
 """FastAPI Application Entry Point with CORS, Lifespan Hooks, and Mounted Routers."""
 
+import os
+import sys
+
+# Prevent Windows symlink privilege error (WinError 1314) for Hugging Face Hub downloads
+os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 

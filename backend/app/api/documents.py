@@ -118,3 +118,50 @@ async def list_documents(
     docs = result.scalars().all()
 
     return [DocumentResponse.model_validate(doc) for doc in docs]
+
+
+@router.delete(
+    "/{document_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete a financial filing and all associated metrics and chunks",
+)
+async def delete_document(
+    document_id: int,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, str]:
+    """
+    Deletes a document by ID. Cascades deletion to financial_metrics and chunks.
+    """
+    query = select(Document).where(Document.id == document_id)
+    result = await session.execute(query)
+    doc = result.scalars().first()
+
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} not found.",
+        )
+
+    await session.delete(doc)
+    await session.commit()
+
+    return {"message": f"Document '{doc.filename}' (ID: {doc.id}) deleted successfully."}
+
+
+@router.delete(
+    "/",
+    status_code=status.HTTP_200_OK,
+    summary="Delete all documents, metrics, and chunks (Fresh Reset)",
+)
+async def clear_all_documents(
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, str]:
+    """
+    Clears all documents from the platform.
+    """
+    from sqlalchemy import delete
+
+    await session.execute(delete(Document))
+    await session.commit()
+
+    return {"message": "All ingested filings, metrics, and vector chunks cleared successfully."}
